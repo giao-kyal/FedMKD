@@ -1,9 +1,19 @@
 import numpy as np
 import torch
 import torchvision
+from PIL import Image
 from torch import nn
 from torchvision import transforms
 
+class ToPILIfNeeded:
+    def __init__(self, mode="RGB"):
+        self.mode = mode
+
+    def __call__(self, x):
+        if isinstance(x, Image.Image):
+            # 如果需要强制 mode，可用 x.convert(self.mode)
+            return x.convert(self.mode) if self.mode is not None else x
+        return transforms.ToPILImage(mode=self.mode)(x)
 
 class MoCoTransform:
     """
@@ -14,7 +24,7 @@ class MoCoTransform:
 
     def __init__(self, size=32, gaussian=False):
         self.train_transform = transforms.Compose([
-            transforms.ToPILImage(mode='RGB'),
+            ToPILIfNeeded(mode='RGB'),
             transforms.RandomResizedCrop(size),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
@@ -45,7 +55,7 @@ class SimSiamTransform:
         if gaussian:
             self.train_transform = torchvision.transforms.Compose(
                 [
-                    torchvision.transforms.ToPILImage(mode='RGB'),
+                    ToPILIfNeeded(mode='RGB'),
                     torchvision.transforms.RandomResizedCrop(size=size),
                     torchvision.transforms.RandomHorizontalFlip(),  # with 0.5 probability
                     torchvision.transforms.RandomApply([color_jitter], p=0.8),
@@ -57,7 +67,7 @@ class SimSiamTransform:
         else:
             self.train_transform = torchvision.transforms.Compose(
                 [
-                    torchvision.transforms.ToPILImage(mode='RGB'),
+                    ToPILIfNeeded(mode='RGB'),
                     torchvision.transforms.RandomResizedCrop(size=size),
                     torchvision.transforms.RandomHorizontalFlip(),  # with 0.5 probability
                     torchvision.transforms.RandomApply([color_jitter], p=0.8),
@@ -93,7 +103,7 @@ class SimCLRTransform:
         if gaussian:
             self.train_transform = torchvision.transforms.Compose(
                 [
-                    torchvision.transforms.ToPILImage(mode='RGB'),
+                    ToPILIfNeeded(mode='RGB'),
                     # torchvision.transforms.Resize(size=size),
                     torchvision.transforms.RandomResizedCrop(size=size),
                     torchvision.transforms.RandomHorizontalFlip(),  # with 0.5 probability
@@ -108,7 +118,7 @@ class SimCLRTransform:
             if data_format == "array":
                 self.train_transform = torchvision.transforms.Compose(
                     [
-                        torchvision.transforms.ToPILImage(mode='RGB'),
+                        ToPILIfNeeded(mode='RGB'),
                         # torchvision.transforms.Resize(size=size),
                         torchvision.transforms.RandomResizedCrop(size=size),
                         torchvision.transforms.RandomHorizontalFlip(),  # with 0.5 probability
@@ -137,7 +147,7 @@ class SimCLRTransform:
 
         self.fine_tune_transform = torchvision.transforms.Compose(
             [
-                torchvision.transforms.ToPILImage(mode='RGB'),
+                ToPILIfNeeded(mode='RGB'),
                 torchvision.transforms.Resize(size=size),
                 torchvision.transforms.ToTensor(),
             ]

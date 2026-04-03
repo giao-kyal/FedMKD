@@ -1,0 +1,21 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# venv
+venv/
+.venv/
+src/venv/
+
+# IDE
+.idea/
+.vscode/
+
+# logs / outputs
+logs/
+src/logs/
+src/saved_models/
+
+# datasets / generated data (按需保留小文件的话再细分)
+data/cifar10/
+src/data/

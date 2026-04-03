@@ -11,9 +11,9 @@ parser.add_argument("--data_partition", type=str, default='iid', help='options: 
 parser.add_argument("--dir_alpha", type=float, default=0.5, help='alpha for dirichlet sampling')
 parser.add_argument('--client_model', default='byol', type=str, help='options: byol, simsiam, simclr, moco, moco_v2')
 # TODO: list server model and clients model
-parser.add_argument('--server_model', default='fedet', type=str, help='options: byolserver, fedmd, single')
+parser.add_argument('--server_model', default='byolserver', type=str, help='options: byolserver, fedmd, single')
 parser.add_argument('--client_type', default='mix', type=str, help='options: resnet18, resnet50, mix, vgg')
-parser.add_argument('--framework', default='fedet', type=str, help='options: ours, fedavg, fedu, oursnoalign, single')
+parser.add_argument('--framework', default='ours', type=str, help='options: ours, fedavg, fedu, oursnoalign, single')
 parser.add_argument('--public', default='iid', type=str, help='options: iid,class')
 
 
@@ -21,7 +21,7 @@ parser.add_argument('--encoder_network', default='resnet18', type=str,
                 help='network architecture of server encoder, options: resnet18, resnet50')
 parser.add_argument('--predictor_network', default='2_layer', type=str,
                 help='network of predictor, options: 1_layer, 2_layer')
-parser.add_argument('--batch_size', default=128, type=int)
+parser.add_argument('--batch_size', default=32, type=int)
 parser.add_argument('--local_epoch', default=1, type=int)  # local epoch
 parser.add_argument('--server_epoch', default=1, type=int)  # server epoch
 parser.add_argument('--rounds', default=1, type=int)  # global epoch
@@ -53,10 +53,34 @@ parser.add_argument('--save_predictor', action='store_true', help='whether save 
 parser.add_argument('--semi_supervised', action='store_true', help='whether to train with semi-supervised data')
 parser.add_argument('--label_ratio', default=0.01, type=float, help='percentage of labeled data')
 
-parser.add_argument('--gpu', default=['2'], nargs='+')
+parser.add_argument('--gpu', default=['0'], nargs='+')
 parser.add_argument('--run_count', default=2, type=int)
 parser.add_argument('--public_size', default=4000, type=int)
 parser.add_argument('--client_num', default=0, type=int)
 
+# ===== ReID (TransReID-style) args =====
+parser.add_argument("--reid_root", type=str, default="/mnt/d/FedMKD/data",
+                    help="Root dir for ReID datasets (Market/Duke/MSMT)")
+parser.add_argument("--reid_height", type=int, default=256)
+parser.add_argument("--reid_width", type=int, default=128)
+
+parser.add_argument("--reid_sampler", type=str, default="softmax_triplet",
+                    help="options: softmax_triplet,triplet, softmax")
+parser.add_argument("--reid_num_instance", type=int, default=4,
+                    help="K in RandomIdentitySampler: P*K=batch_size")
+parser.add_argument("--reid_test_batch_size", type=int, default=256)
+
+parser.add_argument("--reid_flip_prob", type=float, default=0.5)
+parser.add_argument("--reid_padding", type=int, default=10)
+parser.add_argument("--reid_re_prob", type=float, default=0.5)
+
+# 归一化（TransReID默认一般是 ImageNet mean/std）
+parser.add_argument("--reid_pixel_mean", nargs="+", type=float, default=[0.485, 0.456, 0.406])
+parser.add_argument("--reid_pixel_std", nargs="+", type=float, default=[0.229, 0.224, 0.225])
+
+parser.add_argument("--reid_num_workers", type=int, default=8)
+parser.add_argument("--reid_dist_train", action="store_true",
+                    help="Use DDP sampler branch in TransReID dataloader (usually false for now)")
+
 args = parser.parse_args()
-print("arguments: ", args)
+# print("arguments: ", args)

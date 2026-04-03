@@ -1,3 +1,6 @@
+import os, sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import argparse
 from collections import defaultdict, OrderedDict
 
@@ -89,9 +92,9 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", default=3e-3, type=float, help="Initial learning rate.")
     parser.add_argument("--batch_size", default=512, type=int, help="Batch size for training.")
     parser.add_argument("--num_epochs", default=200, type=int, help="Number of epochs to train for.")
-    parser.add_argument("--encoder_network", default="resnet34", type=str, help="Encoder network architecture.")
+    parser.add_argument("--encoder_network", default="resnet18", type=str, help="Encoder network architecture.")
     parser.add_argument("--num_workers", default=8, type=int, help="Number of data workers (caution with nodes!)")
-    parser.add_argument('--gpu', default=2, type=int)
+    parser.add_argument('--gpu', default=0, type=int)
     parser.add_argument("--fc", default="identity", help="options: identity, remove")
     args = parser.parse_args()
     print(args)

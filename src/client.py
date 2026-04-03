@@ -18,6 +18,10 @@ import utils
 from communication import ONLINE, TARGET, BOTH, LOCAL, GLOBAL, DAPU, NONE, EMA, DYNAMIC_DAPU, DYNAMIC_EMA_ONLINE, SELECTIVE_EMA
 from easyfl.client.base import BaseClient
 from tqdm import tqdm
+
+from src.reid.reid_wrapper import ReIDWrapper
+from src.reid.triplet_loss import TripletLoss
+
 logger = logging.getLogger(__name__)
 
 L2 = "l2"
@@ -257,6 +261,34 @@ class FedSSLClient(BaseClient):
         scaler = GradScaler()
         start_time = time.time()
         loss_fn, optimizer = self.pretrain_setup(conf, device)
+        optimizer = torch.optim.SGD(
+            [
+                {"params": self.model.bnneck.parameters()},
+                {"params": self.model.classifier.parameters()},
+            ],
+            lr=conf.optimizer.lr,
+            momentum=conf.optimizer.momentum,
+            weight_decay=conf.optimizer.weight_decay,
+        )
+        # 1) optimizer 里参数数量
+        num_opt_params = sum(p.numel() for g in optimizer.param_groups for p in g["params"])
+        num_opt_trainable = sum(p.numel() for g in optimizer.param_groups for p in g["params"] if p.requires_grad)
+        print("opt params:", num_opt_params, "trainable:", num_opt_trainable)
+
+        # 2) 检查这些参数在什么 device
+        for gi, g in enumerate(optimizer.param_groups):
+            ps = [p for p in g["params"] if p is not None]
+            if ps:
+                print("group", gi, "device:", ps[0].device, "requires_grad:", ps[0].requires_grad)
+
+        # 3) 检查 bnneck/classifier 是否真的 requires_grad=True
+        print("bnneck trainable:", any(p.requires_grad for p in self.model.bnneck.parameters()))
+        print("classifier trainable:", any(p.requires_grad for p in self.model.classifier.parameters()))
+
+        triplet = TripletLoss(margin=getattr(conf, "triplet_margin", 0.3),
+                              hard_factor=getattr(conf, "hard_factor", 0.0))
+        tri_w = getattr(conf, "triplet_weight", 1.0)  # 你可以在配置里加这个
+        ce_w = getattr(conf, "ce_weight", 1.0)
         if conf.model in [model.MoCo, model.MoCoV2]:
             self.model.reset_key_encoder()
         self.train_loss = []
@@ -266,24 +298,58 @@ class FedSSLClient(BaseClient):
         for i in range(conf.local_epoch):
             print(i)
             batch_loss = []
-            for (batched_x1, batched_x2), _ in self.train_loader:
-                x1, x2 = batched_x1.to(device), batched_x2.to(device)
-                optimizer.zero_grad()
+            for batch in self.train_loader:
+                # 兼容：有的reid loader返回 (img, pid, camid, ...)
+                # 你当前代码是 ((x1,x2), _)，所以先按两种情况处理
+                if isinstance(batch[0], (tuple, list)) and len(batch[0]) == 2:
+                    (batched_x1, batched_x2), target = batch
+                    x1, x2 = batched_x1.to(device, non_blocking=True), batched_x2.to(device, non_blocking=True)
+                    target = target.to(device, non_blocking=True)
+                else:
+                    # (img, target, ...)
+                    batched_x1 = batch[0]
+                    target = batch[1]
+                    x1 = batched_x1.to(device, non_blocking=True)
+                    x2 = None
+                    target = target.to(device, non_blocking=True)
+
+                optimizer.zero_grad(set_to_none=True)
 
                 if conf.model in [model.MoCo, model.MoCoV2]:
                     loss = self.model(x1, x2, device)
+
                 elif conf.model == model.SimCLR:
                     images = torch.cat((x1, x2), dim=0)
                     features = self.model(images)
                     logits, labels = self.info_nce_loss(features)
                     loss = loss_fn(logits, labels)
+
                 else:
+                    # ---- ReID supervised align (CE) ----
                     with autocast():
-                        loss = self.model(x1, x2)
+                        score1, feat1 = self.model(x1, target=target)
+                        loss_ce1 = loss_fn(score1, target)
+
+                    # Triplet 通常建议用 fp32 更稳（尤其是 distance matrix）
+                    feat1_fp32 = feat1.float()
+                    loss_tri1, dist_ap1, dist_an1 = triplet(feat1_fp32, target, normalize_feature=False)
+
+                    loss = ce_w * loss_ce1 + tri_w * loss_tri1
+
+                    if x2 is not None:
+                        with autocast():
+                            score2, feat2 = self.model(x2, target=target)
+                            loss_ce2 = loss_fn(score2, target)
+
+                        feat2_fp32 = feat2.float()
+                        loss_tri2, dist_ap2, dist_an2 = triplet(feat2_fp32, target, normalize_feature=False)
+
+                        loss = 0.5 * (loss + (ce_w * loss_ce2 + tri_w * loss_tri2))
+
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
-                batch_loss.append(loss.item())
                 scaler.update()
+                batch_loss.append(float(loss.detach()))
 
             current_epoch_loss = sum(batch_loss) / len(batch_loss)
             self.train_loss.append(float(current_epoch_loss))
@@ -352,24 +418,35 @@ class FedSSLClient(BaseClient):
         if conf.optimizer.lr_type == "cosine":
             lr = compute_lr(conf.round_id, conf.rounds, 0, conf.optimizer.lr)
 
-        # movo_v1 should use the default learning rate
         if conf.model == model.MoCo:
             lr = conf.optimizer.lr
 
+        # 默认：优化整个模型（适用于 ReIDWrapper）
         params = self.model.parameters()
-        if conf.model in [model.BYOL]:
+
+        # BYOL：只有当模型真有 online_encoder/online_predictor 才用该分组
+        if conf.model in [model.BYOL] and hasattr(self.model, "online_encoder"):
+            param_groups = [{'params': self.model.online_encoder.parameters()}]
+            if hasattr(self.model, "online_predictor") and self.model.online_predictor is not None:
+                param_groups.append({'params': self.model.online_predictor.parameters()})
+            params = param_groups
+
+        # 可选：如果你希望 ReIDWrapper 对齐阶段只训 bnneck+classifier（更常见）
+        if isinstance(self.model, ReIDWrapper):
             params = [
-                {'params': self.model.online_encoder.parameters()},
-                {'params': self.model.online_predictor.parameters()}
+                {'params': self.model.bnneck.parameters()},
+                {'params': self.model.classifier.parameters()},
             ]
 
         if conf.optimizer.type == "Adam":
             optimizer = torch.optim.Adam(params, lr=lr)
         else:
-            optimizer = torch.optim.SGD(params,
-                                        lr=lr,
-                                        momentum=conf.optimizer.momentum,
-                                        weight_decay=conf.optimizer.weight_decay)
+            optimizer = torch.optim.SGD(
+                params,
+                lr=lr,
+                momentum=conf.optimizer.momentum,
+                weight_decay=conf.optimizer.weight_decay
+            )
         return optimizer
 
     def _load_transform(self, conf):

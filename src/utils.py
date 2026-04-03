@@ -5,13 +5,27 @@ from model import SimSiam, MoCo
 
 
 def get_transformation(model):
+    """
+    model: str or class
+      - if str: 'simsiam' / 'moco' / 'simclr' / 'byol' / ...
+      - if class: SimSiam / MoCo / ...
+    """
+    # normalize string
+    if isinstance(model, str):
+        key = model.lower()
+        if key == "simsiam":
+            return transform.SimSiamTransform
+        if key in ("moco", "moco_v2"):
+            return transform.MoCoTransform
+        # byol/simclr/fedet/... -> SimCLRTransform (two-view)
+        return transform.SimCLRTransform
+
+    # keep backward-compat for class inputs
     if model == SimSiam:
-        transformation = transform.SimSiamTransform
-    elif model == MoCo:
-        transformation = transform.MoCoTransform
-    else:
-        transformation = transform.SimCLRTransform
-    return transformation
+        return transform.SimSiamTransform
+    if model == MoCo:
+        return transform.MoCoTransform
+    return transform.SimCLRTransform
 
 
 def calculate_model_distance(m1, m2):

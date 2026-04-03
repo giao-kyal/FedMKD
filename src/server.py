@@ -210,73 +210,103 @@ class MyDistillServer(BaseClient):
             self.model.online_predictor = copy.deepcopy(predictor)
 
     def train(self, conf, device):
+        import time
+        import copy
+        import torch
+        from torch.cuda.amp import GradScaler
+
         scaler = GradScaler()
         start_time = time.time()
-        # gpus = device
-        # device = device[0]
-        utils.init_distributed_mode(args)
+
+        # 原始风格：一般不需要 init_distributed_mode（除非你真用DDP）
+        # utils.init_distributed_mode(args)
+
         self.model.train()
         self.model.to(device)
-        # self.model = nn.DataParallel(self.model, device_ids=gpus)
-        # self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=gpus)
-        loss_fn = torch.nn.CrossEntropyLoss()
-        optimizer = torch.optim.SGD(self.model.parameters(),
-                                    lr=conf.optimizer.lr,
-                                    momentum=conf.optimizer.momentum,
-                                    weight_decay=conf.optimizer.weight_decay)
+
+        optimizer = torch.optim.SGD(
+            self.model.parameters(),
+            lr=conf.optimizer.lr,
+            momentum=conf.optimizer.momentum,
+            weight_decay=conf.optimizer.weight_decay
+        )
+
         if self.train_loader is None:
             self.train_loader = self.load_loader(conf)
+
         self.train_loss = []
+
+        # -----------------------------
+        # 回退关键点：teacher 常驻 GPU
+        # -----------------------------
         if self.client_models is not None:
             new_client_models = []
             for c_models in self.client_models:
-                c_models.online_encoder.to(device)
-                new_client_models.append(c_models.online_encoder)
+                enc = c_models.online_encoder
+                enc.eval()
+                for p in enc.parameters():
+                    p.requires_grad_(False)
+                enc.to(device)  # 直接放GPU常驻
+                new_client_models.append(enc)
             self.client_models = new_client_models
-        # self.client_models.to(device)
-        # print(next(self.client_models[0].parameters()).device)
 
-        for i in range(conf.server_epoch):
-            idx = len(self.train_loader)
-            # print("idx is ", idx)
-            # if conf.data_number == 'small':
-            #     idx = 10
-            # else:
-            #     idx = len(self.train_loader)
+        for epoch in range(conf.server_epoch):
+            batch_losses = []
+            t0 = time.time()
 
-            batch_loss = []            # with tqdm(total=len(self.train_loader)) as pbar:
-            for (batched_x1, batched_x2), _ in self.train_loader:
-                x1, x2 = batched_x1.to(device), batched_x2.to(device)
+            for it, ((batched_x1, batched_x2), _) in enumerate(self.train_loader):
+                x1 = batched_x1.to(device, non_blocking=True)
+                x2 = batched_x2.to(device, non_blocking=True)
+
+                # -------- teacher 输出（不搬运）--------
                 if self.client_models is None:
                     client_result = None
                 else:
-                    R_clis_x1 = torch.zeros(x1.size(0), len(self.client_models), self.projection_size)
-                    R_clis_x2 = torch.zeros(x2.size(0), len(self.client_models), self.projection_size)
-                    for c, client_model in enumerate(self.client_models):
-                        R_cli_x1 = client_model(x1)
-                        R_clis_x1[:, c, :] = R_cli_x1  
-                        R_cli_x2 = client_model(x2)
-                        R_clis_x2[:, c, :] = R_cli_x2  
-                    client_result = torch.cat([R_clis_x1, R_clis_x2], dim=0).to(device)  # 2B * N * K
-                optimizer.zero_grad()
-                with autocast():
+                    # N = num_of_clients
+                    outs1 = []
+                    outs2 = []
+                    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
+                        for teacher in self.client_models:
+                            outs1.append(teacher(x1))  # (B, K)
+                            outs2.append(teacher(x2))  # (B, K)
+
+                    # (B, N, K)
+                    R_clis_x1 = torch.stack(outs1, dim=1).to(torch.float16)
+                    R_clis_x2 = torch.stack(outs2, dim=1).to(torch.float16)
+
+                    # (2B, N, K)
+                    client_result = torch.cat([R_clis_x1, R_clis_x2], dim=0)
+
+                # -------- student 训练 --------
+                optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
                     loss = self.model(x1, x2, client_result, device)
 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
-                batch_loss.append(loss.item())
                 scaler.update()
+
+                # 这里用 detach，避免每步 item() 同步
+                batch_losses.append(loss.detach().float())
+
+                if (it + 1) % 50 == 0:
+                    # 端到端吞吐
+                    dt = time.time() - t0
+                    avg_sec = dt / 50.0
+                    loss_avg = torch.stack(batch_losses[-10:]).mean().item()
+                    print(f"[server epoch {epoch + 1}] iter {it + 1}/{len(self.train_loader)} "
+                          f"avg_sec/iter={avg_sec:.3f} loss_avg={loss_avg:.4f}")
+                    t0 = time.time()
+
                 if conf.model in [model.BYOL, model.BYOLServer] and conf.momentum_update:
                     self.model.update_moving_average()
-                idx = idx - 1
-                if idx == 0:
-                    break
-            current_epoch_loss = sum(batch_loss) / len(batch_loss)
-            self.train_loss.append(float(current_epoch_loss))
-        self.train_time = time.time() - start_time
 
-        # store trained model locally
+            epoch_loss = torch.stack(batch_losses).mean().item()
+            self.train_loss.append(float(epoch_loss))
+
+        self.train_time = time.time() - start_time
         self._local_model = copy.deepcopy(self.model).cpu()
+        return self._local_model
 
     def test(self):
         """Testing process of federated learning."""
@@ -366,7 +396,8 @@ class MyDistillServer(BaseClient):
                                               self.cid,
                                               shuffle=True,
                                               drop_last=drop_last,
-                                              seed=conf.seed,
+                                              # seed=conf.seed,
+                                              seed=getattr(conf, "seed", 0),
                                               transform=self._load_transform(conf))
         return train_loader
 

@@ -11,7 +11,7 @@ from easyfl.models.resnet import ResNet18, ResNet34, ResNet50
 from easyfl.models.simple_cnn import Model
 from easyfl.models.vgg9 import VGG9
 import logging
-from cka import cka_score
+# from cka import cka_score
 
 logger = logging.getLogger(__name__)
 
@@ -192,27 +192,36 @@ class SimilarityModel(nn.Module):
 
 
 class SelfAttention(nn.Module):
+    # def __init__(self, k_dim):
+    #     super(SelfAttention, self).__init__()
+    #     self.query_weight = nn.Parameter(torch.randn(k_dim, 1))
+    #     self.key_weight = nn.Parameter(torch.randn(k_dim, k_dim))
+    #     self.scale = torch.sqrt(torch.tensor(k_dim, dtype=torch.float32))
+    #
+    # def forward(self, query, keys):
+    #     """
+    #     Args:
+    #     query (torch.Tensor): K维向量，形状为[K]
+    #     keys (torch.Tensor): N个K维向量，形状为[N, K]
+    #
+    #     Returns:
+    #     torch.Tensor: N个权重，形状为[N]
+    #     """
+    #     query = torch.matmul(query, self.query_weight).transpose(0, -1) / self.scale
+    #     keys = torch.matmul(keys, self.key_weight) / self.scale
+    #     scores = torch.matmul(query, keys.transpose(-1, -2))  # 计算query和keys之间的点积，得分形状为[1, N]
+    #     weights = F.softmax(scores, dim=-1)  # 在最后一个维度上应用softmax以得到权重，权重的形状为[1, N]
+    #
+    #     return weights.squeeze(0)  # 去掉第一个维度，得到形状为[N]的权重张量
     def __init__(self, k_dim):
         super(SelfAttention, self).__init__()
-        self.query_weight = nn.Parameter(torch.randn(k_dim, 1))
-        self.key_weight = nn.Parameter(torch.randn(k_dim, k_dim))
-        self.scale = torch.sqrt(torch.tensor(k_dim, dtype=torch.float32))
+        self.scale = (k_dim ** 0.5)
 
     def forward(self, query, keys):
-        """
-        Args:
-        query (torch.Tensor): K维向量，形状为[K]
-        keys (torch.Tensor): N个K维向量，形状为[N, K]
-        
-        Returns:
-        torch.Tensor: N个权重，形状为[N]
-        """
-        query = torch.matmul(query, self.query_weight).transpose(0, -1) / self.scale
-        keys = torch.matmul(keys, self.key_weight) / self.scale
-        scores = torch.matmul(query, keys.transpose(-1, -2))  # 计算query和keys之间的点积，得分形状为[1, N]
-        weights = F.softmax(scores, dim=-1)  # 在最后一个维度上应用softmax以得到权重，权重的形状为[1, N]
-
-        return weights.squeeze(0)  # 去掉第一个维度，得到形状为[N]的权重张量
+        # query: [B, 1, K], keys: [B, N, K]
+        scores = torch.matmul(query, keys.transpose(-1, -2)) / self.scale  # [B, 1, N]
+        weights = F.softmax(scores, dim=-1).squeeze(1)  # [B, N]
+        return weights
 
 
 def D(p, z, version='simplified'):  # negative cosine similarity
@@ -421,6 +430,8 @@ class BYOLServerModel(BaseModel):
 
         self.K_predictor = MLP(projection_size, K, projection_hidden_size, predictor_network)
 
+        self.client_proj = nn.Linear(projection_size, projection_size)
+
         # self.sim_module = SimilarityModel(K, N)
         self.sim_module = SelfAttention(K)
 
@@ -513,7 +524,8 @@ class BYOLServerModel(BaseModel):
         # 这一行计算了"负样本"的得分。
         # 同样，q 是一个张量，但是 self.queue.clone().detach() 则是一个包含了负样本信息的张量。
         # 'nc,ck->nk' 也是爱因斯坦求和符号的一部分，表示对 q 和 self.queue 进行逐元素相乘，但这次是在 c 这个维度上求和，最后得到一个大小为 NxK 的张量，其中 N 是样本数量，K 是负样本的数量。
-        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
+        queue = self.queue.to(q.dtype)  # q 是 fp16 时 queue 也 fp16
+        l_neg = torch.einsum('nc,ck->nk', [q, queue])
 
         # logits: Nx(1+K)
         logits = torch.cat([l_pos, l_neg], dim=1)
@@ -536,15 +548,20 @@ class BYOLServerModel(BaseModel):
             online_pred_one = self.online_predictor(online_pred_one)
             online_pred_two = self.online_predictor(online_pred_two)
 
-        online_pred = torch.cat([online_pred_one, online_pred_two], dim=0)  # 2B * 1 * K
-        K_result = torch.zeros(online_pred.size(0), client_result.size(1), self.K).to(online_pred.device)  # 2B * N * K
-        for i in range(client_result.size(1)):
-            tmp_client_result = client_result[:, i, :].squeeze(dim=1)
-            K_result[:, i, :] = self.K_predictor(tmp_client_result)
-        K_online_pred = self.K_predictor(online_pred).unsqueeze(dim=1)
-        weight = self.sim_module(K_online_pred, K_result)  # 2B * N
-        #  calculate weighted knowledge
-        teacher_q = torch.sum(weight.unsqueeze(2) * client_result, dim=1)  # 2B*N*1 * 2B*N*dim = 2B*dim
+        online_pred = torch.cat([online_pred_one, online_pred_two], dim=0)  # 2B,Kdim
+        # online_pred: (2B, K0)   client_result: (2B, N, D)
+        B2, N, D = client_result.shape  # B2 = 2B
+        # (2B, N, D) -> (2B*N, D)
+        client_flat = client_result.reshape(B2 * N, D)
+        # 一次性投影与预测： (2B*N, D) -> (2B*N, K)
+        k_flat = self.K_predictor(self.client_proj(client_flat))
+        # reshape 回 (2B, N, K)
+        K_result = k_flat.view(B2, N, self.K)
+
+        K_online_pred = self.K_predictor(online_pred).unsqueeze(1)  # (2B, 1, K)
+        weight = self.sim_module(K_online_pred, K_result)  # (2B, N)
+        # 保持 teacher_q dtype 与 client_result 一致（fp16）
+        teacher_q = (weight.to(client_result.dtype).unsqueeze(2) * client_result).sum(dim=1).to(client_result.dtype)
 
         if self.stop_gradient:
             with torch.no_grad():
