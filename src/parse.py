@@ -78,7 +78,7 @@ parser.add_argument("--reid_re_prob", type=float, default=0.5)
 parser.add_argument("--reid_pixel_mean", nargs="+", type=float, default=[0.485, 0.456, 0.406])
 parser.add_argument("--reid_pixel_std", nargs="+", type=float, default=[0.229, 0.224, 0.225])
 
-parser.add_argument("--reid_num_workers", type=int, default=8)
+parser.add_argument("--reid_num_workers", type=int, default=4)
 parser.add_argument("--reid_dist_train", action="store_true",
                     help="Use DDP sampler branch in TransReID dataloader (usually false for now)")
 
