@@ -273,17 +273,10 @@ class FedSSLClient(BaseClient):
         # 1) optimizer 里参数数量
         num_opt_params = sum(p.numel() for g in optimizer.param_groups for p in g["params"])
         num_opt_trainable = sum(p.numel() for g in optimizer.param_groups for p in g["params"] if p.requires_grad)
-        print("opt params:", num_opt_params, "trainable:", num_opt_trainable)
 
         # 2) 检查这些参数在什么 device
         for gi, g in enumerate(optimizer.param_groups):
             ps = [p for p in g["params"] if p is not None]
-            if ps:
-                print("group", gi, "device:", ps[0].device, "requires_grad:", ps[0].requires_grad)
-
-        # 3) 检查 bnneck/classifier 是否真的 requires_grad=True
-        print("bnneck trainable:", any(p.requires_grad for p in self.model.bnneck.parameters()))
-        print("classifier trainable:", any(p.requires_grad for p in self.model.classifier.parameters()))
 
         triplet = TripletLoss(margin=getattr(conf, "triplet_margin", 0.3),
                               hard_factor=getattr(conf, "hard_factor", 0.0))

@@ -481,6 +481,16 @@ if __name__ == '__main__':
 
     is_reid = args.dataset in ["market1501", "dukemtmcreid", "msmt17"]
 
+    # Pool worker processes are daemonic and cannot spawn DataLoader workers.
+    # ReID branch uses torch.multiprocessing.Pool, so force single-process
+    # dataloading to avoid: "daemonic processes are not allowed to have children".
+    if is_reid and num_processes > 1 and getattr(args, "reid_num_workers", 0) > 0:
+        print(
+            f"[ReID] Detected multiprocessing Pool (processes={num_processes}). "
+            f"Override reid_num_workers: {args.reid_num_workers} -> 0 to avoid nested multiprocessing conflicts."
+        )
+        args.reid_num_workers = 0
+
     if is_reid:
         train_loader, train_loader_normal, val_loader, num_query, num_classes, cam_num, view_num,dataset = make_dataloader(args)
 
@@ -538,7 +548,6 @@ if __name__ == '__main__':
         data_user = client_list
 
         for epoch in range(start_round,args.rounds):
-            print(f"client {i} len(train_loader)={len(client_loaders[i])}, batch_size={client_loaders[i].batch_size}")
             config.client.round_id += 1
             time_start = time.time()
 

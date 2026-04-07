@@ -294,8 +294,6 @@ class MyDistillServer(BaseClient):
                     dt = time.time() - t0
                     avg_sec = dt / 50.0
                     loss_avg = torch.stack(batch_losses[-10:]).mean().item()
-                    print(f"[server epoch {epoch + 1}] iter {it + 1}/{len(self.train_loader)} "
-                          f"avg_sec/iter={avg_sec:.3f} loss_avg={loss_avg:.4f}")
                     t0 = time.time()
 
                 if conf.model in [model.BYOL, model.BYOLServer] and conf.momentum_update:
