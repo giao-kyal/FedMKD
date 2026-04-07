@@ -230,6 +230,44 @@ def client_align(ori_client, server_model, public_dataset, device, config,public
     logger.info(f"--------Time of align is {time.time() - start_time}s--------")
     return new_model_weights
 
+
+def _reid_train_chunk(client_ids, clients_chunk, client_loaders_chunk, client_num_classes_chunk, device, args):
+    if isinstance(device, torch.device) and device.type == "cuda":
+        torch.cuda.set_device(device.index)
+
+    out = []
+    for j, cid in enumerate(client_ids):
+        print(f"------------client[{cid}] training-----------")
+        model_i = clients_chunk[j].to(device)
+        model_i.train()
+
+        cfg_i = make_reid_cfg_for_client(args, sampler=args.reid_sampler, max_epochs=args.local_epoch)
+        loss_fn_i, center_criterion = make_loss(cfg_i, num_classes=client_num_classes_chunk[j])
+        optimizer, optimizer_center = make_optimizer(cfg_i, model_i, center_criterion)
+        scheduler = create_scheduler(cfg_i, optimizer)
+
+        model_i = local_train_reid(
+            cfg_i, model_i, client_loaders_chunk[j],
+            optimizer, optimizer_center, scheduler, loss_fn_i, center_criterion,
+            device=device, local_epochs=args.local_epoch, use_amp=True
+        )
+        out.append(model_i.cpu())
+    return out
+
+
+def _reid_align_chunk(usr_model_weights_chunk, server_model, device, config, client_loaders_chunk):
+    if isinstance(device, torch.device) and device.type == "cuda":
+        torch.cuda.set_device(device.index)
+    return client_align(
+        usr_model_weights_chunk,
+        server_model,
+        public_dataset=None,
+        device=device,
+        config=config,
+        client_loaders=client_loaders_chunk,
+    )
+
+
 # 断点续训
 def _checkpoint_path(save_root: str, task_id: str) -> str:
     # save_root 通常是 args.save_model_path；为空时用 cwd/saved_models/task_id
@@ -288,13 +326,23 @@ def load_checkpoint(path: str, server_model, clients, device):
     return round_id
 
 if __name__ == '__main__':
-    gpu_index = args.gpu
-    # num_processes = len(gpu_index)
-    # devices = [torch.device('cuda', int(index)) for index in gpu_index]
-    num_processes = 1
-    devices = [torch.device('cuda', 0)]
+    try:
+        torch.multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+     # args.gpu 兼容: "0,1,2" / [0,1,2] / ["0","1"]
+    if isinstance(args.gpu, str):
+        gpu_index = [int(x.strip()) for x in args.gpu.split(",") if x.strip() != ""]
+    elif isinstance(args.gpu, (list, tuple)):
+        gpu_index = [int(x) for x in args.gpu]
+    else:
+        gpu_index = [int(args.gpu)]
 
-    client_list = range(args.num_of_clients)
+    devices = [torch.device("cuda", i) for i in gpu_index]
+    # 一般建议每张卡一个进程
+    num_processes = min(len(devices), args.num_of_clients)
+
+    client_list = list(range(args.num_of_clients))
     step = int(np.ceil(len(client_list) / num_processes))
 
     class_per_client = args.class_per_client
@@ -414,7 +462,7 @@ if __name__ == '__main__':
     config = dict_to_ns(config)
 
     # ---- ReID patch ----
-    REID_DATASETS = {"market1501", "dukemtmc", "msmt17"}  # 按你实际支持的名字改
+    REID_DATASETS = {"market1501", "dukemtmc", "msmt17"} 
     if args.dataset.lower() in REID_DATASETS:
         # 用 ReID 的输入尺寸
         config.server.image_size = [args.reid_height, args.reid_width]
@@ -495,33 +543,37 @@ if __name__ == '__main__':
             time_start = time.time()
 
             # ---- 8.1 client 本地监督训练 ----
-            device = devices[0]
-            new_client_wrappers = []
-            usr_model_weights = []
+            ctx = torch.multiprocessing.get_context("spawn")
+            pool = ctx.Pool(processes=num_processes)
+            process_arr = []
 
-            for i in range(args.num_of_clients):
-                print(f"------------client[{i}] training-----------")
-                model_i = clients[i].to(device)
-                model_i.train()
-
-                # cfg: make_loss + optimizer + scheduler 都用同一份 cfg
-                cfg_i = make_reid_cfg_for_client(args, sampler=args.reid_sampler, max_epochs=args.local_epoch)
-
-                loss_fn_i, center_criterion = make_loss(cfg_i, num_classes=client_num_classes[i])
-
-                optimizer, optimizer_center = make_optimizer(cfg_i, model_i, center_criterion)
-                scheduler = create_scheduler(cfg_i, optimizer)
-
-                model_i = local_train_reid(
-                    cfg_i, model_i, client_loaders[i],
-                    optimizer, optimizer_center, scheduler, loss_fn_i, center_criterion,
-                    device=device, local_epochs=args.local_epoch, use_amp=True
+            for pidx in range(num_processes):
+                l = pidx * step
+                r = min((pidx + 1) * step, len(client_list))
+                if l >= r:
+                    continue
+                process_arr.append(
+                    pool.apply_async(
+                        _reid_train_chunk,
+                        args=(
+                            client_list[l:r],
+                            clients[l:r],
+                            client_loaders[l:r],
+                            client_num_classes[l:r],
+                            devices[pidx % len(devices)],
+                            args,
+                        ),
+                    )
                 )
 
-                usr_model_weights.append(model_i.cpu())
+            pool.close()
+            pool.join()
+
+            usr_model_weights = []
+            for proc in process_arr:
+                usr_model_weights.extend(proc.get())
 
             clients = usr_model_weights
-
             print('---------Finishing training clients---------')
             print(f"---------Time cost of ReID client train epoch {epoch} is {time.time() - time_start}s---------")
             logger.info(
@@ -545,14 +597,34 @@ if __name__ == '__main__':
 
                 # ---- 8.3 align：建议只对齐 encoder/target_encoder（避免 classifier shape mismatch）----
                 align_time = time.time()
-                model_weights = client_align(
-                    usr_model_weights,
-                    server_model,
-                    public_dataset=None,
-                    device=devices[0],
-                    config=config,
-                    client_loaders=client_loaders,
-                )
+                ctx = torch.multiprocessing.get_context("spawn")
+                pool = ctx.Pool(processes=num_processes)
+                process_arr = []
+
+                for pidx in range(num_processes):
+                    l = pidx * step
+                    r = min((pidx + 1) * step, len(usr_model_weights))
+                    if l >= r:
+                        continue
+                    process_arr.append(
+                        pool.apply_async(
+                            _reid_align_chunk,
+                            args=(
+                                usr_model_weights[l:r],
+                                server_model,
+                                devices[pidx % len(devices)],
+                                config,
+                                client_loaders[l:r],
+                            ),
+                        )
+                    )
+
+                pool.close()
+                pool.join()
+
+                model_weights = []
+                for proc in process_arr:
+                    model_weights.extend(proc.get())
 
                 for i in range(len(clients)):
                     clients[i].bnneck.load_state_dict(model_weights[i]["bnneck"])
@@ -583,7 +655,7 @@ if __name__ == '__main__':
             save_checkpoint(ckpt_path, round_id=epoch + 1, server_model=server_model, clients=clients)
             print(f"[CKPT] Saved checkpoint at round {epoch + 1} -> {ckpt_path}")
 
-        sys.exit(0)
+        sys.exit(0) 
     else:
         # split public data first
         if args.semi_supervised:
