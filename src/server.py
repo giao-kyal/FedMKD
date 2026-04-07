@@ -236,19 +236,31 @@ class MyDistillServer(BaseClient):
 
         self.train_loss = []
 
+        teacher_devices = getattr(self, "teacher_devices", None)
+        if not teacher_devices:
+            teacher_devices = [device]
+        teacher_devices = [d if isinstance(d, torch.device) else torch.device(d) for d in teacher_devices]
+        teacher_devices = [d for d in teacher_devices if d.type == "cuda"]
+        if not teacher_devices:
+            teacher_devices = [device]
+
         # -----------------------------
         # 回退关键点：teacher 常驻 GPU
         # -----------------------------
         if self.client_models is not None:
             new_client_models = []
-            for c_models in self.client_models:
+            for idx, c_models in enumerate(self.client_models):
                 enc = c_models.online_encoder
                 enc.eval()
                 for p in enc.parameters():
                     p.requires_grad_(False)
-                enc.to(device)  # 直接放GPU常驻
-                new_client_models.append(enc)
+                teacher_device = teacher_devices[idx % len(teacher_devices)]
+                enc.to(teacher_device)
+                new_client_models.append((enc, teacher_device))
             self.client_models = new_client_models
+            logger.info(
+                f"Distill teacher parallel enabled: teachers={len(self.client_models)}, devices={teacher_devices}"
+            )
 
         for epoch in range(conf.server_epoch):
             batch_losses = []
@@ -265,10 +277,18 @@ class MyDistillServer(BaseClient):
                     # N = num_of_clients
                     outs1 = []
                     outs2 = []
+                    x1_cache = {device: x1}
+                    x2_cache = {device: x2}
                     with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
-                        for teacher in self.client_models:
-                            outs1.append(teacher(x1))  # (B, K)
-                            outs2.append(teacher(x2))  # (B, K)
+                        for teacher, teacher_device in self.client_models:
+                            if teacher_device not in x1_cache:
+                                x1_cache[teacher_device] = batched_x1.to(teacher_device, non_blocking=True)
+                                x2_cache[teacher_device] = batched_x2.to(teacher_device, non_blocking=True)
+
+                            t_x1 = x1_cache[teacher_device]
+                            t_x2 = x2_cache[teacher_device]
+                            outs1.append(teacher(t_x1).to(device, non_blocking=True))
+                            outs2.append(teacher(t_x2).to(device, non_blocking=True))
 
                     # (B, N, K)
                     R_clis_x1 = torch.stack(outs1, dim=1).to(torch.float16)

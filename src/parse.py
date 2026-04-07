@@ -21,7 +21,7 @@ parser.add_argument('--encoder_network', default='resnet18', type=str,
                 help='network architecture of server encoder, options: resnet18, resnet50')
 parser.add_argument('--predictor_network', default='2_layer', type=str,
                 help='network of predictor, options: 1_layer, 2_layer')
-parser.add_argument('--batch_size', default=32, type=int)
+parser.add_argument('--batch_size', default=64, type=int)
 parser.add_argument('--local_epoch', default=1, type=int)  # local epoch
 parser.add_argument('--server_epoch', default=1, type=int)  # server epoch
 parser.add_argument('--rounds', default=1, type=int)  # global epoch

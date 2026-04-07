@@ -23,13 +23,13 @@ import numpy as np
 import random
 import json
 import pandas as pd
+import traceback
 from collections import OrderedDict
 
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from multiprocessing import cpu_count
-from torch.multiprocessing import Pool
 import copy
 import time
 import scipy.sparse as sp
@@ -160,7 +160,7 @@ def client_main(client_list, data_list, device, epoch, clients, train_data, test
     return new_model_weights
 
 
-def server_train(client_models, server_model, public_dataset, test_data, device, epoch,public_loader = None):
+def server_train(client_models, server_model, public_dataset, test_data, device, epoch, public_loader=None, distill_devices=None):
     # multi-teacher distillation
     # input: clients model, server model, device, public dataset
     # output: server model
@@ -170,6 +170,7 @@ def server_train(client_models, server_model, public_dataset, test_data, device,
         raise ValueError(f"framework type is wrong")
     server.model = server_model
     server.client_models = client_models
+    server.teacher_devices = distill_devices
     start_time = time.time()
 
     if public_loader is not None:
@@ -266,6 +267,60 @@ def _reid_align_chunk(usr_model_weights_chunk, server_model, device, config, cli
         config=config,
         client_loaders=client_loaders_chunk,
     )
+
+
+def _state_dict_cpu(state_dict):
+    return {k: v.detach().cpu() for k, v in state_dict.items()}
+
+
+def _reid_train_worker_entry(slot_id, client_ids, clients_chunk, client_loaders_chunk,
+                             client_num_classes_chunk, device, args, result_dict):
+    try:
+        trained_models = _reid_train_chunk(
+            client_ids,
+            clients_chunk,
+            client_loaders_chunk,
+            client_num_classes_chunk,
+            device,
+            args,
+        )
+        result_dict[slot_id] = {
+            "ok": True,
+            "client_ids": list(client_ids),
+            "states": [_state_dict_cpu(m.state_dict()) for m in trained_models],
+        }
+    except Exception:
+        result_dict[slot_id] = {
+            "ok": False,
+            "error": traceback.format_exc(),
+        }
+
+
+def _reid_align_worker_entry(slot_id, usr_model_weights_chunk, server_model, device,
+                             config, client_loaders_chunk, result_dict):
+    try:
+        aligned_weights = _reid_align_chunk(
+            usr_model_weights_chunk,
+            server_model,
+            device,
+            config,
+            client_loaders_chunk,
+        )
+        cpu_weights = []
+        for item in aligned_weights:
+            cpu_weights.append({
+                "bnneck": _state_dict_cpu(item["bnneck"]),
+                "classifier": _state_dict_cpu(item["classifier"]),
+            })
+        result_dict[slot_id] = {
+            "ok": True,
+            "weights": cpu_weights,
+        }
+    except Exception:
+        result_dict[slot_id] = {
+            "ok": False,
+            "error": traceback.format_exc(),
+        }
 
 
 # 断点续训
@@ -481,15 +536,10 @@ if __name__ == '__main__':
 
     is_reid = args.dataset in ["market1501", "dukemtmcreid", "msmt17"]
 
-    # Pool worker processes are daemonic and cannot spawn DataLoader workers.
-    # ReID branch uses torch.multiprocessing.Pool, so force single-process
-    # dataloading to avoid: "daemonic processes are not allowed to have children".
-    if is_reid and num_processes > 1 and getattr(args, "reid_num_workers", 0) > 0:
+    if is_reid and num_processes > 1:
         print(
-            f"[ReID] Detected multiprocessing Pool (processes={num_processes}). "
-            f"Override reid_num_workers: {args.reid_num_workers} -> 0 to avoid nested multiprocessing conflicts."
+            f"[ReID] Using spawn Process backend (non-daemon), keep reid_num_workers={args.reid_num_workers}."
         )
-        args.reid_num_workers = 0
 
     if is_reid:
         train_loader, train_loader_normal, val_loader, num_query, num_classes, cam_num, view_num,dataset = make_dataloader(args)
@@ -553,34 +603,63 @@ if __name__ == '__main__':
 
             # ---- 8.1 client 本地监督训练 ----
             ctx = torch.multiprocessing.get_context("spawn")
-            pool = ctx.Pool(processes=num_processes)
-            process_arr = []
+            manager = ctx.Manager()
+            train_result_dict = manager.dict()
+            train_procs = []
+            active_slots = []
 
             for pidx in range(num_processes):
                 l = pidx * step
                 r = min((pidx + 1) * step, len(client_list))
                 if l >= r:
                     continue
-                process_arr.append(
-                    pool.apply_async(
-                        _reid_train_chunk,
-                        args=(
-                            client_list[l:r],
-                            clients[l:r],
-                            client_loaders[l:r],
-                            client_num_classes[l:r],
-                            devices[pidx % len(devices)],
-                            args,
-                        ),
-                    )
+                slot_id = pidx
+                proc = ctx.Process(
+                    target=_reid_train_worker_entry,
+                    args=(
+                        slot_id,
+                        client_list[l:r],
+                        clients[l:r],
+                        client_loaders[l:r],
+                        client_num_classes[l:r],
+                        devices[pidx % len(devices)],
+                        args,
+                        train_result_dict,
+                    ),
                 )
+                proc.start()
+                train_procs.append((slot_id, proc))
+                active_slots.append(slot_id)
 
-            pool.close()
-            pool.join()
+            for _, proc in train_procs:
+                proc.join()
 
-            usr_model_weights = []
-            for proc in process_arr:
-                usr_model_weights.extend(proc.get())
+            errors = []
+            for slot_id, proc in train_procs:
+                if slot_id not in train_result_dict:
+                    errors.append(f"train worker slot={slot_id} exited with code={proc.exitcode} and no result")
+                    continue
+                result = train_result_dict[slot_id]
+                if not result.get("ok", False):
+                    errors.append(f"train worker slot={slot_id} failed:\n{result.get('error', '')}")
+
+            if errors:
+                manager.shutdown()
+                raise RuntimeError("ReID parallel local training failed:\n" + "\n".join(errors))
+
+            usr_model_weights = [None] * len(client_list)
+            for slot_id in sorted(active_slots):
+                result = train_result_dict[slot_id]
+                cids = result["client_ids"]
+                states = result["states"]
+                for cid, sd in zip(cids, states):
+                    clients[cid].load_state_dict(sd, strict=False)
+                    usr_model_weights[cid] = clients[cid].cpu()
+
+            manager.shutdown()
+
+            if any(x is None for x in usr_model_weights):
+                raise RuntimeError("ReID parallel local training returned incomplete client models.")
 
             clients = usr_model_weights
             print('---------Finishing training clients---------')
@@ -598,7 +677,8 @@ if __name__ == '__main__':
                     test_data = val_loader,
                     device=devices[0],
                     epoch=epoch,
-                    public_loader=public_loader
+                    public_loader=public_loader,
+                    distill_devices=devices,
                 )
                 print("---------Finish distill---------")
                 print(f"---------Time cost of distill is {time.time() - start_time}s---------")
@@ -607,33 +687,54 @@ if __name__ == '__main__':
                 # ---- 8.3 align：建议只对齐 encoder/target_encoder（避免 classifier shape mismatch）----
                 align_time = time.time()
                 ctx = torch.multiprocessing.get_context("spawn")
-                pool = ctx.Pool(processes=num_processes)
-                process_arr = []
+                manager = ctx.Manager()
+                align_result_dict = manager.dict()
+                align_procs = []
+                active_slots = []
 
                 for pidx in range(num_processes):
                     l = pidx * step
                     r = min((pidx + 1) * step, len(usr_model_weights))
                     if l >= r:
                         continue
-                    process_arr.append(
-                        pool.apply_async(
-                            _reid_align_chunk,
-                            args=(
-                                usr_model_weights[l:r],
-                                server_model,
-                                devices[pidx % len(devices)],
-                                config,
-                                client_loaders[l:r],
-                            ),
-                        )
+                    slot_id = pidx
+                    proc = ctx.Process(
+                        target=_reid_align_worker_entry,
+                        args=(
+                            slot_id,
+                            usr_model_weights[l:r],
+                            server_model,
+                            devices[pidx % len(devices)],
+                            config,
+                            client_loaders[l:r],
+                            align_result_dict,
+                        ),
                     )
+                    proc.start()
+                    align_procs.append((slot_id, proc))
+                    active_slots.append(slot_id)
 
-                pool.close()
-                pool.join()
+                for _, proc in align_procs:
+                    proc.join()
+
+                errors = []
+                for slot_id, proc in align_procs:
+                    if slot_id not in align_result_dict:
+                        errors.append(f"align worker slot={slot_id} exited with code={proc.exitcode} and no result")
+                        continue
+                    result = align_result_dict[slot_id]
+                    if not result.get("ok", False):
+                        errors.append(f"align worker slot={slot_id} failed:\n{result.get('error', '')}")
+
+                if errors:
+                    manager.shutdown()
+                    raise RuntimeError("ReID parallel align failed:\n" + "\n".join(errors))
 
                 model_weights = []
-                for proc in process_arr:
-                    model_weights.extend(proc.get())
+                for slot_id in sorted(active_slots):
+                    model_weights.extend(align_result_dict[slot_id]["weights"])
+
+                manager.shutdown()
 
                 for i in range(len(clients)):
                     clients[i].bnneck.load_state_dict(model_weights[i]["bnneck"])
@@ -799,7 +900,14 @@ if __name__ == '__main__':
             if config.framework == 'ours':
                 # train server model use distill, server only need the client online encoder
                 start_time = time.time()
-                server_model = server_train(usr_model_weights, server_model, public_data, devices[0], epoch)
+                server_model = server_train(
+                    usr_model_weights,
+                    server_model,
+                    public_data,
+                    devices[0],
+                    epoch,
+                    distill_devices=devices,
+                )
                 print("---------Finish distill---------")
                 logger.info(f"---------Time cost of distill is {time.time() - start_time}s---------")
                 # align local model in server, change target network
