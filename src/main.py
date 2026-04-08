@@ -87,6 +87,36 @@ CIFAR100 = "cifar100"
 logger = logging.getLogger(__name__)
 
 
+def setup_run_logger(log_dir: Path, level=logging.INFO):
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "run.log"
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Prevent duplicate handlers when script is relaunched in the same process.
+    for h in list(root_logger.handlers):
+        root_logger.removeHandler(h)
+
+    file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(formatter)
+
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
+
+    return log_file
+
+
 def ignore_resize_warning(message, category, filename, lineno, file=None, line=None):
     if "An output with one or more elements was resized" in str(message):
         return True
@@ -419,6 +449,8 @@ if __name__ == '__main__':
     TRACK_DIR = SRC_DIR / "logs" / task_id
     TRACK_DIR.mkdir(parents=True, exist_ok=True)
     TRACK_DB = TRACK_DIR / "tracking.sqlite"
+    run_log_file = setup_run_logger(TRACK_DIR)
+    logger.info(f"Run log file: {run_log_file}")
 
     config = {
         "task_id": task_id,
