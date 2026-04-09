@@ -244,31 +244,32 @@ class MyDistillServer(BaseClient):
         if not teacher_devices:
             teacher_devices = [device]
 
-        # -----------------------------
-        # 回退关键点：teacher 常驻 GPU
-        # -----------------------------
-        if self.client_models is not None:
-            new_client_models = []
-            for idx, c_models in enumerate(self.client_models):
-                enc = c_models.online_encoder
-                enc.eval()
-                for p in enc.parameters():
-                    p.requires_grad_(False)
-                teacher_device = teacher_devices[idx % len(teacher_devices)]
-                enc.to(teacher_device)
-                new_client_models.append((enc, teacher_device))
-            self.client_models = new_client_models
-            logger.info(
-                f"Distill teacher parallel enabled: teachers={len(self.client_models)}, devices={teacher_devices}"
-            )
+        try:
+            # -----------------------------
+            # 回退关键点：teacher 常驻 GPU
+            # -----------------------------
+            if self.client_models is not None:
+                new_client_models = []
+                for idx, c_models in enumerate(self.client_models):
+                    enc = c_models.online_encoder
+                    enc.eval()
+                    for p in enc.parameters():
+                        p.requires_grad_(False)
+                    teacher_device = teacher_devices[idx % len(teacher_devices)]
+                    enc.to(teacher_device)
+                    new_client_models.append((enc, teacher_device))
+                self.client_models = new_client_models
+                logger.info(
+                    f"Distill teacher parallel enabled: teachers={len(self.client_models)}, devices={teacher_devices}"
+                )
 
-        for epoch in range(conf.server_epoch):
-            batch_losses = []
-            t0 = time.time()
+            for epoch in range(conf.server_epoch):
+                batch_losses = []
+                t0 = time.time()
 
-            for it, ((batched_x1, batched_x2), _) in enumerate(self.train_loader):
-                x1 = batched_x1.to(device, non_blocking=True)
-                x2 = batched_x2.to(device, non_blocking=True)
+                for it, ((batched_x1, batched_x2), _) in enumerate(self.train_loader):
+                    x1 = batched_x1.to(device, non_blocking=True)
+                    x2 = batched_x2.to(device, non_blocking=True)
 
                 # -------- teacher 输出（不搬运）--------
                 if self.client_models is None:
@@ -297,34 +298,52 @@ class MyDistillServer(BaseClient):
                     # (2B, N, K)
                     client_result = torch.cat([R_clis_x1, R_clis_x2], dim=0)
 
-                # -------- student 训练 --------
-                optimizer.zero_grad(set_to_none=True)
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    loss = self.model(x1, x2, client_result, device)
+                    # -------- student 训练 --------
+                    optimizer.zero_grad(set_to_none=True)
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        loss = self.model(x1, x2, client_result, device)
 
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
 
-                # 这里用 detach，避免每步 item() 同步
-                batch_losses.append(loss.detach().float())
+                    # 这里用 detach，避免每步 item() 同步
+                    batch_losses.append(loss.detach().float())
 
-                if (it + 1) % 50 == 0:
-                    # 端到端吞吐
-                    dt = time.time() - t0
-                    avg_sec = dt / 50.0
-                    loss_avg = torch.stack(batch_losses[-10:]).mean().item()
-                    t0 = time.time()
+                    if (it + 1) % 50 == 0:
+                        # 端到端吞吐
+                        dt = time.time() - t0
+                        avg_sec = dt / 50.0
+                        loss_avg = torch.stack(batch_losses[-10:]).mean().item()
+                        t0 = time.time()
 
-                if conf.model in [model.BYOL, model.BYOLServer] and conf.momentum_update:
-                    self.model.update_moving_average()
+                    if conf.model in [model.BYOL, model.BYOLServer] and conf.momentum_update:
+                        self.model.update_moving_average()
 
-            epoch_loss = torch.stack(batch_losses).mean().item()
-            self.train_loss.append(float(epoch_loss))
+                epoch_loss = torch.stack(batch_losses).mean().item()
+                self.train_loss.append(float(epoch_loss))
 
-        self.train_time = time.time() - start_time
-        self._local_model = copy.deepcopy(self.model).cpu()
-        return self._local_model
+            self.train_time = time.time() - start_time
+            self._local_model = copy.deepcopy(self.model).cpu()
+            return self._local_model
+        finally:
+            # Explicitly release teacher encoders from all GPUs each round.
+            if isinstance(self.client_models, list):
+                released = []
+                for item in self.client_models:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        enc, teacher_device = item
+                        released.append(teacher_device)
+                        enc.cpu()
+                        del enc
+                self.client_models = None
+                for dev in set(released):
+                    with torch.cuda.device(dev):
+                        torch.cuda.empty_cache()
+
+            if isinstance(device, torch.device) and device.type == "cuda":
+                with torch.cuda.device(device):
+                    torch.cuda.empty_cache()
 
     def test(self):
         """Testing process of federated learning."""

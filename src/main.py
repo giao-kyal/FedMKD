@@ -283,6 +283,11 @@ def _reid_train_chunk(client_ids, clients_chunk, client_loaders_chunk, client_nu
             device=device, local_epochs=args.local_epoch, use_amp=True
         )
         out.append(model_i.cpu())
+
+        # Release per-client training objects early to avoid long-run VRAM growth.
+        del cfg_i, loss_fn_i, center_criterion, optimizer, optimizer_center, scheduler, model_i
+        if isinstance(device, torch.device) and device.type == "cuda":
+            torch.cuda.empty_cache()
     return out
 
 
