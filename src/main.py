@@ -346,6 +346,20 @@ def _debug_eval_clients_reid(clients, val_loader, num_query, device, args):
     logger.info(f"[Client Test][Epoch Debug][avg_first_{eval_num}] {avg_metrics}")
 
 
+def _debug_eval_server_reid(server_model, val_loader, num_query, device, args, stage_name):
+    if not getattr(args, "reid_debug_eval_server_stages", False):
+        return
+
+    metrics = test_reid(
+        server_model.online_encoder,
+        val_loader,
+        num_query=num_query,
+        device=device,
+        reranking=getattr(args, "reid_rerank", False),
+    )
+    logger.info(f"[Server Test][{stage_name}] {metrics}")
+
+
 def _reid_train_worker_entry(slot_id, client_ids, clients_chunk, client_loaders_chunk,
                              client_num_classes_chunk, device, args, result_dict):
     try:
@@ -758,6 +772,14 @@ if __name__ == '__main__':
                 print("---------Finish distill---------")
                 print(f"---------Time cost of distill is {time.time() - start_time}s---------")
                 logger.info(f"---------Time cost of distill is {time.time() - start_time}s---------")
+                _debug_eval_server_reid(
+                    server_model,
+                    val_loader,
+                    num_query,
+                    devices[0],
+                    args,
+                    stage_name=f"Epoch {epoch + 1} After Distill",
+                )
 
                 # ---- 8.3 align：建议只对齐 encoder/target_encoder（避免 classifier shape mismatch）----
                 align_time = time.time()
@@ -828,6 +850,14 @@ if __name__ == '__main__':
                     )
                     print(f"[Global Test][Epoch {epoch + 1}] {results}")
                     logger.info(f"[Global Test][Epoch {epoch + 1}] {results}")
+                    _debug_eval_server_reid(
+                        server_model,
+                        val_loader,
+                        num_query,
+                        devices[0],
+                        args,
+                        stage_name=f"Epoch {epoch + 1} After Align",
+                    )
                     _debug_eval_clients_reid(
                         clients,
                         val_loader,

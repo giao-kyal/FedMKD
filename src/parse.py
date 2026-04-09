@@ -85,6 +85,8 @@ parser.add_argument("--reid_debug_eval_clients", action="store_true",
                     help="Also evaluate client encoders during global test for diagnosis")
 parser.add_argument("--reid_debug_eval_client_num", type=int, default=2,
                     help="Number of clients to evaluate when --reid_debug_eval_clients is enabled")
+parser.add_argument("--reid_debug_eval_server_stages", action="store_true",
+                    help="Evaluate server encoder right after distill and again after align for diagnosis")
 
 args = parser.parse_args()
 # print("arguments: ", args)
