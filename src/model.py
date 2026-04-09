@@ -584,7 +584,7 @@ class BYOLServerModel(BaseModel):
 
         loss_distill, q, k = self.contrastive_loss(teacher_q, online_pred, device)
         self._dequeue_and_enqueue(k)
-        loss = 0.1 * (loss_one.mean() + loss_two.mean()) + 0.9 * loss_distill
+        loss = 0.5 * (loss_one.mean() + loss_two.mean()) + 0.5 * loss_distill
         return loss
 
 class WeightServerModel(BaseModel):
