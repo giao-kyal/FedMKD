@@ -81,6 +81,10 @@ parser.add_argument("--reid_pixel_std", nargs="+", type=float, default=[0.229, 0
 parser.add_argument("--reid_num_workers", type=int, default=4)
 parser.add_argument("--reid_dist_train", action="store_true",
                     help="Use DDP sampler branch in TransReID dataloader (usually false for now)")
+parser.add_argument("--reid_debug_eval_clients", action="store_true",
+                    help="Also evaluate client encoders during global test for diagnosis")
+parser.add_argument("--reid_debug_eval_client_num", type=int, default=2,
+                    help="Number of clients to evaluate when --reid_debug_eval_clients is enabled")
 
 args = parser.parse_args()
 # print("arguments: ", args)

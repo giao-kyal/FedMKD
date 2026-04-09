@@ -308,6 +308,44 @@ def _state_dict_cpu(state_dict):
     return {k: v.detach().cpu() for k, v in state_dict.items()}
 
 
+def _avg_reid_metrics(metrics_list):
+    if not metrics_list:
+        return None
+
+    keys = ["mAP", "Rank-1", "Rank-5", "Rank-10"]
+    out = {}
+    for key in keys:
+        vals = [m.get(key) for m in metrics_list if m.get(key) is not None]
+        out[key] = float(np.mean(vals)) if vals else None
+    return out
+
+
+def _debug_eval_clients_reid(clients, val_loader, num_query, device, args):
+    if not getattr(args, "reid_debug_eval_clients", False):
+        return
+
+    eval_num = int(getattr(args, "reid_debug_eval_client_num", 0))
+    if eval_num <= 0:
+        return
+
+    eval_num = min(eval_num, len(clients))
+    per_client_metrics = []
+
+    for cid in range(eval_num):
+        metrics = test_reid(
+            clients[cid].online_encoder,
+            val_loader,
+            num_query=num_query,
+            device=device,
+            reranking=getattr(args, "reid_rerank", False),
+        )
+        per_client_metrics.append(metrics)
+        logger.info(f"[Client Test][Epoch Debug][client={cid}] {metrics}")
+
+    avg_metrics = _avg_reid_metrics(per_client_metrics)
+    logger.info(f"[Client Test][Epoch Debug][avg_first_{eval_num}] {avg_metrics}")
+
+
 def _reid_train_worker_entry(slot_id, client_ids, clients_chunk, client_loaders_chunk,
                              client_num_classes_chunk, device, args, result_dict):
     try:
@@ -790,6 +828,13 @@ if __name__ == '__main__':
                     )
                     print(f"[Global Test][Epoch {epoch + 1}] {results}")
                     logger.info(f"[Global Test][Epoch {epoch + 1}] {results}")
+                    _debug_eval_clients_reid(
+                        clients,
+                        val_loader,
+                        num_query,
+                        devices[0],
+                        args,
+                    )
 
             elif config.framework == 'fedavg':
                 raise ValueError(
