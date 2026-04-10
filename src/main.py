@@ -421,7 +421,25 @@ def _checkpoint_path(save_root: str, task_id: str) -> str:
     return os.path.join(save_root, "checkpoint.pth")
 
 
-def save_checkpoint(path: str, round_id: int, server_model, clients):
+def _best_checkpoint_path(save_root: str, task_id: str) -> str:
+    if save_root == "":
+        save_root = os.path.join(os.getcwd(), "saved_models", task_id)
+    else:
+        save_root = os.path.join(save_root, "saved_models", task_id) if not save_root.endswith("saved_models") else os.path.join(save_root, task_id)
+    os.makedirs(save_root, exist_ok=True)
+    return os.path.join(save_root, "best_checkpoint.pth")
+
+
+def _best_model_path(save_root: str, task_id: str) -> str:
+    if save_root == "":
+        save_root = os.path.join(os.getcwd(), "saved_models", task_id)
+    else:
+        save_root = os.path.join(save_root, "saved_models", task_id) if not save_root.endswith("saved_models") else os.path.join(save_root, task_id)
+    os.makedirs(save_root, exist_ok=True)
+    return os.path.join(save_root, "best_global_model.pth")
+
+
+def save_checkpoint(path: str, round_id: int, server_model, clients, meta=None):
     ckpt = {
         "round_id": int(round_id),
         "server_model": server_model.cpu().state_dict(),
@@ -433,7 +451,14 @@ def save_checkpoint(path: str, round_id: int, server_model, clients):
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         },
     }
+    if meta is not None:
+        ckpt["meta"] = meta
     torch.save(ckpt, path)
+
+
+def save_best_artifacts(path: str, model_path: str, round_id: int, server_model, clients, metrics):
+    save_checkpoint(path, round_id, server_model, clients, meta={"best_metrics": metrics})
+    torch.save(server_model.cpu().state_dict(), model_path)
 
 
 def load_checkpoint(path: str, server_model, clients, device):
@@ -466,6 +491,20 @@ def load_checkpoint(path: str, server_model, clients, device):
         c.to(device)
 
     return round_id
+
+
+def load_best_metrics(path: str):
+    if not os.path.exists(path):
+        return {"round_id": -1, "Rank-1": -1.0, "mAP": -1.0}
+
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    meta = ckpt.get("meta", {})
+    best_metrics = meta.get("best_metrics", {})
+    return {
+        "round_id": int(ckpt.get("round_id", -1)),
+        "Rank-1": float(best_metrics.get("Rank-1", -1.0)),
+        "mAP": float(best_metrics.get("mAP", -1.0)),
+    }
 
 if __name__ == '__main__':
     try:
@@ -672,7 +711,13 @@ if __name__ == '__main__':
         print('---------Start ReID training---------')
 
         ckpt_path = _checkpoint_path(args.save_model_path, task_id)
+        best_ckpt_path = _best_checkpoint_path(args.save_model_path, task_id)
+        best_model_path = _best_model_path(args.save_model_path, task_id)
         start_round = 0
+        best_state = load_best_metrics(best_ckpt_path)
+        best_rank1 = float(best_state.get("Rank-1", -1.0))
+        best_map = float(best_state.get("mAP", -1.0))
+        best_round = int(best_state.get("round_id", -1))
 
         if os.path.exists(ckpt_path):
             print(f"[CKPT] Found checkpoint: {ckpt_path}, resuming...")
@@ -681,6 +726,13 @@ if __name__ == '__main__':
             start_round = last_done_round  # last_done_round 表示已完成轮数
         else:
             print(f"[CKPT] No checkpoint found, training from scratch.")
+
+        logger.info(
+            f"[CKPT] Best state before training: round={best_round}, Rank-1={best_rank1}, mAP={best_map}"
+        )
+        print(
+            f"[CKPT] Best before training: round={best_round}, Rank-1={best_rank1}, mAP={best_map}"
+        )
 
         # ReID 这边的 “data_user / weight / avg_weights” 如果你不做 FedAvg 可以不需要
         client_list = list(range(args.num_of_clients))
@@ -850,6 +902,30 @@ if __name__ == '__main__':
                     )
                     print(f"[Global Test][Epoch {epoch + 1}] {results}")
                     logger.info(f"[Global Test][Epoch {epoch + 1}] {results}")
+
+                    current_rank1 = float(results.get("Rank-1", -1.0))
+                    current_map = float(results.get("mAP", -1.0))
+                    is_better = (
+                        current_rank1 > best_rank1
+                        or (np.isclose(current_rank1, best_rank1) and current_map > best_map)
+                    )
+                    if is_better:
+                        best_rank1 = current_rank1
+                        best_map = current_map
+                        best_round = epoch + 1
+                        save_best_artifacts(
+                            best_ckpt_path,
+                            best_model_path,
+                            epoch + 1,
+                            server_model,
+                            clients,
+                            results,
+                        )
+                        logger.info(
+                            f"[CKPT] Saved best server model at round {best_round} -> {best_model_path} "
+                            f"(Rank-1={best_rank1}, mAP={best_map})"
+                        )
+
                     _debug_eval_server_reid(
                         server_model,
                         val_loader,
@@ -874,7 +950,18 @@ if __name__ == '__main__':
 
             print("---------Time cost of epoch {:d} is {:.1f}s---------".format(epoch, time.time() - time_start))
             # 这一轮完成后保存 checkpoint，round_id 用 epoch+1 表示“完成到第几轮”
-            save_checkpoint(ckpt_path, round_id=epoch + 1, server_model=server_model, clients=clients)
+            save_checkpoint(
+                ckpt_path,
+                round_id=epoch + 1,
+                server_model=server_model,
+                clients=clients,
+                meta={
+                    "best_round": best_round,
+                    "best_rank1": best_rank1,
+                    "best_mAP": best_map,
+                    "best_model_path": best_model_path,
+                },
+            )
             print(f"[CKPT] Saved checkpoint at round {epoch + 1} -> {ckpt_path}")
 
         sys.exit(0) 
