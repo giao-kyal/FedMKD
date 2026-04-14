@@ -29,6 +29,8 @@ class Model(BaseModel):
     def __init__(self, features=make_layers(cfg['VGG9'], batch_norm=False), num_classes=10):
         super(Model, self).__init__()
         self.features = features
+        # Keep flattened feature size stable for different input resolutions.
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
         self.classifier = nn.Sequential(
             nn.Dropout(p=0.1),
             nn.Linear(4096, 512),
@@ -42,6 +44,7 @@ class Model(BaseModel):
 
     def forward(self, x):
         x = self.features(x)
+        x = self.adaptive_pool(x)
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
         x = self.fc(x)
