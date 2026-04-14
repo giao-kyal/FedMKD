@@ -153,6 +153,22 @@ def make_reid_cfg_for_client(args, sampler, max_epochs):
         ),
     )
 
+
+def build_client_encoder_plan(client_type, num_clients):
+    """Return per-client encoder names based on client_type."""
+    if client_type == 'resnet18':
+        return ['resnet18'] * num_clients
+    if client_type == 'resnet34':
+        return ['resnet34'] * num_clients
+    if client_type == 'resnet50':
+        return ['resnet50'] * num_clients
+    if client_type == 'vgg':
+        return ['vgg'] * num_clients
+    if client_type == 'mix':
+        pattern = ['resnet18', 'resnet18', 'vgg', 'vgg', 'vgg']
+        return [pattern[i % len(pattern)] for i in range(num_clients)]
+    raise ValueError(f"Unsupported client_type: {client_type}")
+
 def dict_to_ns(d):
     if isinstance(d, dict):
         return SimpleNamespace(**{k: dict_to_ns(v) for k, v in d.items()})
@@ -701,9 +717,12 @@ if __name__ == '__main__':
         else:
             raise ValueError(f"Unsupported framework in ReID branch: {args.framework}")
 
+        client_encoder_plan = build_client_encoder_plan(args.client_type, args.num_of_clients)
+        logger.info(f"[ReID] Client encoder plan: {client_encoder_plan}")
+
         clients = []
         for i in range(args.num_of_clients):
-            base = get_model(args.client_model, args.encoder_network, args.predictor_network)
+            base = get_model(args.client_model, client_encoder_plan[i], args.predictor_network)
             cli = ReIDWrapper(base, num_classes=client_num_classes[i], feat_dim=2048)
             clients.append(cli)
 
