@@ -349,7 +349,7 @@ def _debug_eval_clients_reid(clients, val_loader, num_query, device, args):
 
     for cid in range(eval_num):
         metrics = test_reid(
-            clients[cid].online_encoder,
+            clients[cid], # 完整ReID评估
             val_loader,
             num_query=num_query,
             device=device,
