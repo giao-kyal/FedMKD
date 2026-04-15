@@ -324,16 +324,16 @@ def _state_dict_cpu(state_dict):
     return {k: v.detach().cpu() for k, v in state_dict.items()}
 
 
-def _avg_reid_metrics(metrics_list):
-    if not metrics_list:
-        return None
+# def _avg_reid_metrics(metrics_list):
+#     if not metrics_list:
+#         return None
 
-    keys = ["mAP", "Rank-1", "Rank-5", "Rank-10"]
-    out = {}
-    for key in keys:
-        vals = [m.get(key) for m in metrics_list if m.get(key) is not None]
-        out[key] = float(np.mean(vals)) if vals else None
-    return out
+#     keys = ["mAP", "Rank-1", "Rank-5", "Rank-10"]
+#     out = {}
+#     for key in keys:
+#         vals = [m.get(key) for m in metrics_list if m.get(key) is not None]
+#         out[key] = float(np.mean(vals)) if vals else None
+#     return out
 
 
 def _debug_eval_clients_reid(clients, val_loader, num_query, device, args):
@@ -357,9 +357,6 @@ def _debug_eval_clients_reid(clients, val_loader, num_query, device, args):
         )
         per_client_metrics.append(metrics)
         logger.info(f"[Client Test][Epoch Debug][client={cid}] {metrics}")
-
-    avg_metrics = _avg_reid_metrics(per_client_metrics)
-    logger.info(f"[Client Test][Epoch Debug][avg_first_{eval_num}] {avg_metrics}")
 
 
 def _debug_eval_server_reid(server_model, val_loader, num_query, device, args, stage_name):
