@@ -547,8 +547,8 @@ if __name__ == '__main__':
     task_id = args.task_id
     if task_id == "":
         task_id = f"{args.dataset}_{args.framework}_{args.client_type}_{args.server_model}_{args.num_of_clients}_" \
-                  f"{args.encoder_network}_{args.data_partition}_{args.dir_alpha}_" \
-                  f"{args.local_epoch}_{args.server_epoch}_{args.rounds}_{args.batch_size}_{args.public}_{args.data_size}_{args.public_size}"
+                  f"{args.encoder_network}_" \
+                  f"{args.local_epoch}_{args.server_epoch}_{args.rounds}_{args.batch_size}"
 
     # print(task_id)
     momentum_update = True
