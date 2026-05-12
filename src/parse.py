@@ -12,7 +12,8 @@ parser.add_argument("--dir_alpha", type=float, default=0.5, help='alpha for diri
 parser.add_argument('--client_model', default='byol', type=str, help='options: byol, simsiam, simclr, moco, moco_v2')
 # TODO: list server model and clients model
 parser.add_argument('--server_model', default='byolserver', type=str, help='options: byolserver, fedmd, single')
-parser.add_argument('--client_type', default='mix', type=str, help='options: resnet18, resnet50, mix, vgg')
+parser.add_argument('--client_type', default='mix', type=str,
+                    help='options: resnet18, resnet50, mix, reid_hetero, vgg')
 parser.add_argument('--framework', default='ours', type=str, help='options: ours, fedavg, fedu, oursnoalign, single')
 parser.add_argument('--public', default='iid', type=str, help='options: iid,class')
 
@@ -70,9 +71,9 @@ parser.add_argument("--reid_num_instance", type=int, default=4,
                     help="K in RandomIdentitySampler: P*K=batch_size")
 parser.add_argument("--reid_test_batch_size", type=int, default=256)
 
-parser.add_argument("--reid_flip_prob", type=float, default=0.5)
-parser.add_argument("--reid_padding", type=int, default=10)
-parser.add_argument("--reid_re_prob", type=float, default=0.5)
+parser.add_argument("--reid_flip_prob", type=float, default=0.0)
+parser.add_argument("--reid_padding", type=int, default=0)
+parser.add_argument("--reid_re_prob", type=float, default=0.0)
 
 # 归一化（TransReID默认一般是 ImageNet mean/std）
 parser.add_argument("--reid_pixel_mean", nargs="+", type=float, default=[0.485, 0.456, 0.406])

@@ -35,6 +35,13 @@ class ReIDWrapper(nn.Module):
             return self.base_model.byol.target_encoder
         return None
 
+    @target_encoder.setter
+    def target_encoder(self, value):
+        if hasattr(self.base_model, "byol") and hasattr(self.base_model.byol, "target_encoder"):
+            self.base_model.byol.target_encoder = value
+        else:
+            self.base_model.target_encoder = value
+
     def extract_feat(self, img):
         feat = self.online_encoder(img)
         if feat.dim() == 4:

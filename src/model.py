@@ -558,34 +558,11 @@ class BYOLServerModel(BaseModel):
         # reshape 回 (2B, N, K)
         K_result = k_flat.view(B2, N, self.K)
 
-        K_online_pred = self.K_predictor(online_pred).unsqueeze(1)  # (2B, 1, K)
-        weight = self.sim_module(K_online_pred, K_result)  # (2B, N)
-        # 保持 teacher_q dtype 与 client_result 一致（fp16）
-        teacher_q = (weight.to(client_result.dtype).unsqueeze(2) * client_result).sum(dim=1).to(client_result.dtype)
-
-        if self.stop_gradient:
-            with torch.no_grad():
-                if self.target_encoder is None:
-                    self.target_encoder = self._get_target_encoder()
-                target_proj_one = self.target_encoder(image_one)
-                target_proj_two = self.target_encoder(image_two)
-
-                target_proj_one = target_proj_one.detach()
-                target_proj_two = target_proj_two.detach()
-
-        else:
-            if self.target_encoder is None:
-                self.target_encoder = self._get_target_encoder()
-            target_proj_one = self.target_encoder(image_one)
-            target_proj_two = self.target_encoder(image_two)
-
-        loss_one = byol_loss_fn(online_pred_one, target_proj_two)
-        loss_two = byol_loss_fn(online_pred_two, target_proj_one)
-
-        loss_distill, q, k = self.contrastive_loss(teacher_q, online_pred, device)
-        self._dequeue_and_enqueue(k)
-        loss = 0.5 * (loss_one.mean() + loss_two.mean()) + 0.5 * loss_distill
-        return loss
+        student_logits = self.K_predictor(online_pred)
+        weight = self.sim_module(student_logits.unsqueeze(1), K_result)  # (2B, N)
+        teacher_logits = (weight.unsqueeze(2) * K_result).sum(dim=1)
+        teacher_labels = teacher_logits.detach().argmax(dim=1)
+        return F.cross_entropy(student_logits, teacher_labels)
 
 class WeightServerModel(BaseModel):
     def __init__(
@@ -736,35 +713,16 @@ class WeightServerModel(BaseModel):
         for i in range(client_result.size(1)):
             tmp_client_result = client_result[:, i, :].squeeze(dim=1)
             K_result[:, i, :] = self.K_predictor(tmp_client_result)
-        K_online_pred = self.K_predictor(online_pred).unsqueeze(dim=1)
-        # weight = self.sim_module(K_online_pred, K_result)  # 2B * N
-        weight = torch.ones_like(client_result) / client_result.size(1)
-        #  calculate weighted knowledge
-        # teacher_q = torch.sum(weight.unsqueeze(2) * client_result, dim=1)  # 2B*N*1 * 2B*N*dim = 2B*dim
-        teacher_q = torch.sum(weight * client_result, dim=1)
-        if self.stop_gradient:
-            with torch.no_grad():
-                if self.target_encoder is None:
-                    self.target_encoder = self._get_target_encoder()
-                target_proj_one = self.target_encoder(image_one)
-                target_proj_two = self.target_encoder(image_two)
-
-                target_proj_one = target_proj_one.detach()
-                target_proj_two = target_proj_two.detach()
-
-        else:
-            if self.target_encoder is None:
-                self.target_encoder = self._get_target_encoder()
-            target_proj_one = self.target_encoder(image_one)
-            target_proj_two = self.target_encoder(image_two)
-
-        loss_one = byol_loss_fn(online_pred_one, target_proj_two)
-        loss_two = byol_loss_fn(online_pred_two, target_proj_one)
-
-        loss_distill, q, k = self.contrastive_loss(teacher_q, online_pred, device)
-        self._dequeue_and_enqueue(k)
-        loss = 0.1 * (loss_one.mean() + loss_two.mean()) + 0.9 * loss_distill
-        return loss
+        student_logits = self.K_predictor(online_pred)
+        weight = torch.ones(
+            student_logits.size(0),
+            client_result.size(1),
+            dtype=student_logits.dtype,
+            device=student_logits.device,
+        ) / client_result.size(1)
+        teacher_logits = (weight.unsqueeze(2) * K_result).sum(dim=1)
+        teacher_labels = teacher_logits.detach().argmax(dim=1)
+        return F.cross_entropy(student_logits, teacher_labels)
 
 
 class KLServerModel(BaseModel):
@@ -813,7 +771,6 @@ class KLServerModel(BaseModel):
         self.K = K
         self.T = T
         self.queue_len = queue_len
-        self.criterion_div = DistillKL(4)
         # debug  purpose
         # self.forward(torch.randn(2, 3, image_size, image_size), torch.randn(2, 3, image_size, image_size))
         # self.reset_moving_average()
@@ -917,37 +874,11 @@ class KLServerModel(BaseModel):
         for i in range(client_result.size(1)):
             tmp_client_result = client_result[:, i, :].squeeze(dim=1)
             K_result[:, i, :] = self.K_predictor(tmp_client_result)
-        K_online_pred = self.K_predictor(online_pred).unsqueeze(dim=1)
-        weight = self.sim_module(K_online_pred, K_result)  # 2B * N
-        #  calculate weighted knowledge
-        teacher_q = torch.sum(weight.unsqueeze(2) * client_result, dim=1)  # 2B*N*1 * 2B*N*dim = 2B*dim
-
-        if self.stop_gradient:
-            with torch.no_grad():
-                if self.target_encoder is None:
-                    self.target_encoder = self._get_target_encoder()
-                target_proj_one = self.target_encoder(image_one)
-                target_proj_two = self.target_encoder(image_two)
-
-                target_proj_one = target_proj_one.detach()
-                target_proj_two = target_proj_two.detach()
-
-        else:
-            if self.target_encoder is None:
-                self.target_encoder = self._get_target_encoder()
-            target_proj_one = self.target_encoder(image_one)
-            target_proj_two = self.target_encoder(image_two)
-
-        loss_one = byol_loss_fn(online_pred_one, target_proj_two)
-        loss_two = byol_loss_fn(online_pred_two, target_proj_one)
-
-        # loss_distill, q, k = self.contrastive_loss(teacher_q, online_pred, device)
-        # self._dequeue_and_enqueue(k)
-
-        loss_distill = self.criterion_div(online_pred, teacher_q)
-
-        loss = 0.1 * (loss_one.mean() + loss_two.mean()) + 0.9 * loss_distill
-        return loss
+        student_logits = self.K_predictor(online_pred)
+        weight = self.sim_module(student_logits.unsqueeze(1), K_result)  # 2B * N
+        teacher_logits = (weight.unsqueeze(2) * K_result).sum(dim=1)
+        teacher_labels = teacher_logits.detach().argmax(dim=1)
+        return F.cross_entropy(student_logits, teacher_labels)
 
 
 class EMA:

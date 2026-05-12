@@ -45,7 +45,7 @@ from reid.make_scheduler import create_scheduler
 from reid.public_ssl_dataset import PublicReIDSSL
 from reid.reid_split import split_train_by_pid
 from reid.reid_test import test_reid
-from reid.reid_wrapper import ReIDWrapper
+from reid.backbones import build_reid_client_model
 
 
 
@@ -129,7 +129,7 @@ def make_reid_cfg_for_client(args, sampler, max_epochs):
         MODEL=SimpleNamespace(
             METRIC_LOSS_TYPE="triplet",
             NO_MARGIN=False,
-            IF_LABELSMOOTH="on",
+            IF_LABELSMOOTH="off",
             ID_LOSS_WEIGHT=1.0,
             TRIPLET_LOSS_WEIGHT=1.0,
         ),
@@ -165,7 +165,10 @@ def build_client_encoder_plan(client_type, num_clients):
     if client_type == 'vgg':
         return ['vgg'] * num_clients
     if client_type == 'mix':
-        pattern = ['resnet18', 'resnet18', 'vgg', 'vgg', 'vgg']
+        pattern = ['resnet18', 'transreid_vit_base', 'transreid_deit_small', 'agw', 'pcb']
+        return [pattern[i % len(pattern)] for i in range(num_clients)]
+    if client_type == 'reid_hetero':
+        pattern = ['resnet18', 'transreid_vit_base', 'transreid_deit_small', 'agw', 'pcb']
         return [pattern[i % len(pattern)] for i in range(num_clients)]
     raise ValueError(f"Unsupported client_type: {client_type}")
 
@@ -719,8 +722,7 @@ if __name__ == '__main__':
 
         clients = []
         for i in range(args.num_of_clients):
-            base = get_model(args.client_model, client_encoder_plan[i], args.predictor_network)
-            cli = ReIDWrapper(base, num_classes=client_num_classes[i], feat_dim=2048)
+            cli = build_reid_client_model(client_encoder_plan[i], num_classes=client_num_classes[i])
             clients.append(cli)
 
 
