@@ -63,7 +63,7 @@ torch.backends.cudnn.enabled = False
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 import easyfl
-import utils
+from src import utils
 
 from model import get_model, BYOL
 from dataset import get_semi_supervised_dataset

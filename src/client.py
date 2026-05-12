@@ -14,7 +14,7 @@ from torch.cuda.amp import autocast as autocast, GradScaler
 
 import os
 import model
-import utils
+from src import utils
 from communication import ONLINE, TARGET, BOTH, LOCAL, GLOBAL, DAPU, NONE, EMA, DYNAMIC_DAPU, DYNAMIC_EMA_ONLINE, SELECTIVE_EMA
 from easyfl.client.base import BaseClient
 from tqdm import tqdm

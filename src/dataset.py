@@ -8,7 +8,7 @@ from easyfl.datasets import FederatedTensorDataset
 from easyfl.datasets.data import CIFAR100
 from easyfl.datasets.simulation import data_simulation
 from easyfl.datasets.utils.util import save_dict, load_dict
-from utils import get_transformation
+from src.utils import get_transformation
 
 logger = logging.getLogger(__name__)
 
