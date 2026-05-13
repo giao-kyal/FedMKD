@@ -8,7 +8,6 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import torch
-from parse import args as global_args
 from reid.datasets.make_dataloader import make_dataloader
 from reid.reid_test import test_reid
 from model import get_model
@@ -38,13 +37,24 @@ def main():
     parser.add_argument('--num_clients', type=int, default=None, help='number of clients to evaluate (default: all)')
     args = parser.parse_args()
 
-    # prepare args for dataloader
-    if args.dataset:
-        global_args.dataset = args.dataset
-    if args.reid_root:
-        global_args.reid_root = args.reid_root
-    # be conservative on workers
-    global_args.reid_num_workers = 0
+    # Build a lightweight namespace instead of importing src/parse.py,
+    # which would parse argv too early and reject eval-only flags.
+    global_args = argparse.Namespace(
+        dataset=args.dataset or 'market1501',
+        reid_root=args.reid_root or os.path.join(PROJECT_ROOT, 'data'),
+        reid_height=256,
+        reid_width=128,
+        reid_pixel_mean=[0.485, 0.456, 0.406],
+        reid_pixel_std=[0.229, 0.224, 0.225],
+        reid_num_workers=0,
+        reid_test_batch_size=256,
+        reid_sampler='softmax_triplet',
+        reid_dist_train=False,
+        reid_rerank=False,
+        client_model='byol',
+        encoder_network='resnet18',
+        predictor_network='2_layer',
+    )
 
     # build dataloader
     _, _, val_loader, num_query, _, _, _, _ = make_dataloader(global_args)
@@ -55,7 +65,7 @@ def main():
         print('Warning: cannot read client encoder plan from run.log. Will assume homogeneous clients.')
 
     # load checkpoint
-    saved_models_dir = os.path.join(os.getcwd(), 'saved_models', args.task_id)
+    saved_models_dir = os.path.join(args.run_dir, 'saved_models', args.task_id)
     ckpt_path = os.path.join(saved_models_dir, 'checkpoint.pth')
     if not os.path.exists(ckpt_path):
         ckpt_path = os.path.join(saved_models_dir, 'best_checkpoint.pth')
