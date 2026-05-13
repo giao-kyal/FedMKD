@@ -10,7 +10,7 @@ if PROJECT_ROOT not in sys.path:
 import torch
 from reid.datasets.make_dataloader import make_dataloader
 from reid.reid_test import test_reid
-from model import get_model
+from reid.backbones.hetero import build_reid_client_model
 
 
 def read_client_plan_from_log(run_log_path):
@@ -42,6 +42,7 @@ def main():
     global_args = argparse.Namespace(
         dataset=args.dataset or 'market1501',
         reid_root=args.reid_root or os.path.join(PROJECT_ROOT, 'data'),
+        batch_size=64,
         reid_height=256,
         reid_width=128,
         reid_pixel_mean=[0.485, 0.456, 0.406],
@@ -51,9 +52,6 @@ def main():
         reid_sampler='softmax_triplet',
         reid_dist_train=False,
         reid_rerank=False,
-        client_model='byol',
-        encoder_network='resnet18',
-        predictor_network='2_layer',
     )
 
     # build dataloader
@@ -88,19 +86,22 @@ def main():
     results = []
     for i in range(eval_n):
         enc_name = plan[i] if plan and i < len(plan) else None
-        # construct a client model instance
-        try:
-            if enc_name:
-                client_model = get_model(global_args.client_model, enc_name, global_args.predictor_network)
-            else:
-                client_model = get_model(global_args.client_model, global_args.encoder_network, global_args.predictor_network)
-        except Exception:
-            # fallback: generic construction
-            client_model = get_model(global_args.client_model, global_args.encoder_network, global_args.predictor_network)
+
+        state_dict = client_states[i]
+        classifier_weight = None
+        for key in ("classifier.weight", "module.classifier.weight"):
+            if key in state_dict:
+                classifier_weight = state_dict[key]
+                break
+        if classifier_weight is None:
+            raise RuntimeError(f'Cannot infer num_classes for client {i}; classifier weight missing.')
+
+        num_classes = int(classifier_weight.shape[0])
+        client_model = build_reid_client_model(enc_name or 'resnet18', num_classes=num_classes)
 
         # load state (use strict=False to be tolerant of minor mismatches)
         try:
-            client_model.load_state_dict(client_states[i], strict=False)
+            client_model.load_state_dict(state_dict, strict=False)
         except Exception as e:
             print(f'Warning: failed to load state for client {i} strictly: {e}')
 
