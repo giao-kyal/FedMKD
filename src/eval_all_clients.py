@@ -16,11 +16,12 @@ from reid.backbones.hetero import build_reid_client_model
 def read_client_plan_from_log(run_log_path):
     if not os.path.exists(run_log_path):
         return None
+    marker = '[ReID] Client encoder plan:'
     with open(run_log_path, 'r', encoding='utf-8') as f:
         for line in f:
-            if '[ReID] Client encoder plan:' in line:
+            if marker in line:
                 try:
-                    part = line.split(':', 1)[1].strip()
+                    part = line[line.index(marker) + len(marker):].strip()
                     plan = ast.literal_eval(part)
                     return plan
                 except Exception:
@@ -63,7 +64,7 @@ def main():
         print('Warning: cannot read client encoder plan from run.log. Will assume homogeneous clients.')
 
     # load checkpoint
-    saved_models_dir = os.path.join(args.run_dir, 'saved_models', args.task_id)
+    saved_models_dir = os.path.join('saved_models', args.task_id)
     ckpt_path = os.path.join(saved_models_dir, 'checkpoint.pth')
     if not os.path.exists(ckpt_path):
         ckpt_path = os.path.join(saved_models_dir, 'best_checkpoint.pth')
@@ -72,6 +73,7 @@ def main():
         return
 
     ckpt = torch.load(ckpt_path, map_location='cpu')
+    print(f'Loaded checkpoint round_id={ckpt.get("round_id", -1)} from {ckpt_path}')
     client_states = ckpt.get('clients', [])
     if not client_states:
         print('Checkpoint contains no client states. Exiting.')
@@ -101,7 +103,13 @@ def main():
 
         # load state (use strict=False to be tolerant of minor mismatches)
         try:
-            client_model.load_state_dict(state_dict, strict=False)
+            incompatible = client_model.load_state_dict(state_dict, strict=False)
+            if getattr(incompatible, 'missing_keys', None) or getattr(incompatible, 'unexpected_keys', None):
+                print(
+                    f'Client {i} load_state_dict mismatch: '
+                    f'missing={list(incompatible.missing_keys)}, '
+                    f'unexpected={list(incompatible.unexpected_keys)}'
+                )
         except Exception as e:
             print(f'Warning: failed to load state for client {i} strictly: {e}')
 
