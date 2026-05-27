@@ -14,6 +14,7 @@ import os
 
 import model
 from src import utils
+from src.reid.triplet_loss import TripletLoss
 from communication import ONLINE, TARGET, BOTH, LOCAL, GLOBAL, DAPU, NONE, EMA, DYNAMIC_DAPU, DYNAMIC_EMA_ONLINE, \
     SELECTIVE_EMA
 from easyfl.client.base import BaseClient
@@ -231,6 +232,19 @@ class MyDistillServer(BaseClient):
             weight_decay=conf.optimizer.weight_decay
         )
 
+        reid_head = getattr(self.model, "reid_head", None)
+        if reid_head is not None:
+            reid_head.train()
+            reid_head.to(device)
+            reid_ce_loss = nn.CrossEntropyLoss()
+            reid_triplet = TripletLoss(
+                margin=getattr(conf, "triplet_margin", 0.3),
+                hard_factor=getattr(conf, "hard_factor", 0.0),
+            )
+            reid_loss_weight = getattr(conf, "reid_loss_weight", 1.0)
+            reid_ce_weight = getattr(conf, "reid_ce_weight", 1.0)
+            reid_triplet_weight = getattr(conf, "reid_triplet_weight", 1.0)
+
         if self.train_loader is None:
             self.train_loader = self.load_loader(conf)
 
@@ -267,7 +281,12 @@ class MyDistillServer(BaseClient):
                 batch_losses = []
                 t0 = time.time()
 
-                for it, ((batched_x1, batched_x2), _) in enumerate(self.train_loader):
+                for it, batch in enumerate(self.train_loader):
+                    if reid_head is not None:
+                        (batched_x1, batched_x2), target = batch
+                        target = target.to(device, non_blocking=True)
+                    else:
+                        (batched_x1, batched_x2), _ = batch
                     x1 = batched_x1.to(device, non_blocking=True)
                     x2 = batched_x2.to(device, non_blocking=True)
 
@@ -302,6 +321,27 @@ class MyDistillServer(BaseClient):
                     optimizer.zero_grad(set_to_none=True)
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
                         loss = self.model(x1, x2, client_result, device)
+
+                    if reid_head is not None:
+                        with autocast(enabled=True):
+                            score1, feat1 = reid_head(x1, target=target)
+                            loss_ce1 = reid_ce_loss(score1, target)
+
+                        feat1_fp32 = feat1.float()
+                        loss_tri1, _, _ = reid_triplet(feat1_fp32, target, normalize_feature=False)
+
+                        reid_loss = reid_ce_weight * loss_ce1 + reid_triplet_weight * loss_tri1
+
+                        if x2 is not None:
+                            with autocast(enabled=True):
+                                score2, feat2 = reid_head(x2, target=target)
+                                loss_ce2 = reid_ce_loss(score2, target)
+
+                            feat2_fp32 = feat2.float()
+                            loss_tri2, _, _ = reid_triplet(feat2_fp32, target, normalize_feature=False)
+                            reid_loss = 0.5 * (reid_loss + (reid_ce_weight * loss_ce2 + reid_triplet_weight * loss_tri2))
+
+                        loss = loss + reid_loss_weight * reid_loss
 
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)

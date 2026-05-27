@@ -11,6 +11,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 # also keep src itself in path for `import reid`
+from reid.reid_wrapper import ReIDWrapper
 SRC_DIR = os.path.abspath(os.path.dirname(__file__))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
@@ -171,6 +172,12 @@ def build_client_encoder_plan(client_type, num_clients):
         pattern = ['resnet18', 'transreid_vit_base', 'transreid_deit_small', 'agw', 'pcb']
         return [pattern[i % len(pattern)] for i in range(num_clients)]
     raise ValueError(f"Unsupported client_type: {client_type}")
+
+
+def build_server_reid_head(server_model, num_classes, feat_dim=2048):
+    """Attach a trainable ReID head that reuses the server encoder features."""
+    proxy = SimpleNamespace(online_encoder=server_model.online_encoder)
+    return ReIDWrapper(proxy, num_classes=num_classes, feat_dim=feat_dim)
 
 def dict_to_ns(d):
     if isinstance(d, dict):
@@ -366,8 +373,12 @@ def _debug_eval_server_reid(server_model, val_loader, num_query, device, args, s
     if not getattr(args, "reid_debug_eval_server_stages", False):
         return
 
+    testing_model = getattr(server_model, "reid_head", None)
+    if testing_model is None:
+        testing_model = server_model.online_encoder
+
     metrics = test_reid(
-        server_model.online_encoder,
+        testing_model,
         val_loader,
         num_query=num_query,
         device=device,
@@ -714,6 +725,7 @@ if __name__ == '__main__':
 
         if args.framework in ['ours', 'single', 'oursnoalign']:
             server_model = get_model(args.server_model, args.encoder_network, args.predictor_network)
+            server_model.reid_head = build_server_reid_head(server_model, num_classes=num_classes)
         else:
             raise ValueError(f"Unsupported framework in ReID branch: {args.framework}")
 
@@ -911,8 +923,11 @@ if __name__ == '__main__':
                 logger.info(f"---------Time cost of align is {time.time() - align_time}s---------")
 
                 if (epoch + 1) % args.test_every == 0:
+                    testing_model = getattr(server_model, "reid_head", None)
+                    if testing_model is None:
+                        testing_model = server_model.online_encoder
                     results = test_reid(
-                        server_model.online_encoder,
+                        testing_model,
                         val_loader,
                         num_query=num_query,
                         device=devices[0],

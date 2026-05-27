@@ -11,6 +11,7 @@ class PublicReIDSSL(Dataset):
 
     def __getitem__(self, idx):
         img_path = self.items[idx][0]
+        pid = self.items[idx][1]
         img = Image.open(img_path).convert("RGB")
         out = self.transform(img) if self.transform is not None else img
 
@@ -20,4 +21,4 @@ class PublicReIDSSL(Dataset):
             x1 = out
             x2 = self.transform(img) if self.transform is not None else img
 
-        return (x1, x2), 0
+        return (x1, x2), pid
