@@ -174,14 +174,15 @@ def build_client_encoder_plan(client_type, num_clients):
     raise ValueError(f"Unsupported client_type: {client_type}")
 
 
+class ServerEncoderProxy(torch.nn.Module):
+    def __init__(self, encoder):
+        super().__init__()
+        self.online_encoder = encoder
+
+
 def build_server_reid_head(server_model, num_classes, feat_dim=2048):
     """Attach a trainable ReID head that reuses the server encoder features."""
-    class _ServerEncoderProxy(torch.nn.Module):
-        def __init__(self, encoder):
-            super().__init__()
-            self.online_encoder = encoder
-
-    proxy = _ServerEncoderProxy(server_model.online_encoder)
+    proxy = ServerEncoderProxy(server_model.online_encoder)
     return ReIDWrapper(proxy, num_classes=num_classes, feat_dim=feat_dim)
 
 def dict_to_ns(d):
@@ -496,7 +497,18 @@ def save_best_artifacts(path: str, model_path: str, round_id: int, server_model,
 def load_checkpoint(path: str, server_model, clients, device):
     ckpt = torch.load(path, map_location="cpu",weights_only=False)
 
-    server_model.load_state_dict(ckpt["server_model"], strict=False)
+    incompatible = server_model.load_state_dict(ckpt["server_model"], strict=False)
+    missing_keys = list(getattr(incompatible, "missing_keys", []))
+    unexpected_keys = list(getattr(incompatible, "unexpected_keys", []))
+    if missing_keys or unexpected_keys:
+        logger.warning(
+            f"[CKPT] load_state_dict mismatch: missing={missing_keys[:10]}, unexpected={unexpected_keys[:10]}"
+        )
+    if hasattr(server_model, "reid_head") and not any(k.startswith("reid_head.") for k in ckpt["server_model"].keys()):
+        logger.warning(
+            "[CKPT] checkpoint does not contain reid_head parameters; "
+            "if this is an old checkpoint, global test head is randomly initialized and results are not comparable."
+        )
 
     # 恢复每个 client 的权重（假设 clients 列表长度不变）
     client_states = ckpt.get("clients", [])
