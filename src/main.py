@@ -176,7 +176,12 @@ def build_client_encoder_plan(client_type, num_clients):
 
 def build_server_reid_head(server_model, num_classes, feat_dim=2048):
     """Attach a trainable ReID head that reuses the server encoder features."""
-    proxy = SimpleNamespace(online_encoder=server_model.online_encoder)
+    class _ServerEncoderProxy(torch.nn.Module):
+        def __init__(self, encoder):
+            super().__init__()
+            self.online_encoder = encoder
+
+    proxy = _ServerEncoderProxy(server_model.online_encoder)
     return ReIDWrapper(proxy, num_classes=num_classes, feat_dim=feat_dim)
 
 def dict_to_ns(d):
