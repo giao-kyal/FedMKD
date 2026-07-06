@@ -224,6 +224,25 @@ class SelfAttention(nn.Module):
         return weights
 
 
+def reid_feature_distill_loss(student_feat, client_result, relation_weight=0.5):
+    if client_result is None:
+        return student_feat.sum() * 0.0
+
+    student_feat = student_feat.float()
+    teacher_feat = client_result.float().detach()
+
+    teacher_feat = F.normalize(teacher_feat, dim=2).mean(dim=1)
+    teacher_feat = F.normalize(teacher_feat, dim=1)
+    student_feat = F.normalize(student_feat, dim=1)
+
+    feature_loss = F.mse_loss(student_feat, teacher_feat)
+    student_relation = torch.matmul(student_feat, student_feat.t())
+    teacher_relation = torch.matmul(teacher_feat, teacher_feat.t())
+    relation_loss = F.mse_loss(student_relation, teacher_relation)
+
+    return feature_loss + relation_weight * relation_loss
+
+
 def D(p, z, version='simplified'):  # negative cosine similarity
     if version == 'original':
         z = z.detach()  # stop gradient
@@ -541,6 +560,11 @@ class BYOLServerModel(BaseModel):
         return loss, q, k
 
     def forward(self, image_one, image_two, client_result, device):
+        student_feat_one = self.online_encoder(image_one)
+        student_feat_two = self.online_encoder(image_two)
+        student_feat = torch.cat([student_feat_one, student_feat_two], dim=0)
+        return reid_feature_distill_loss(student_feat, client_result)
+
         online_pred_one = self.online_encoder(image_one)  # batch*2048
         online_pred_two = self.online_encoder(image_two)
 
@@ -701,6 +725,11 @@ class WeightServerModel(BaseModel):
         return loss, q, k
 
     def forward(self, image_one, image_two, client_result, device):
+        student_feat_one = self.online_encoder(image_one)
+        student_feat_two = self.online_encoder(image_two)
+        student_feat = torch.cat([student_feat_one, student_feat_two], dim=0)
+        return reid_feature_distill_loss(student_feat, client_result)
+
         online_pred_one = self.online_encoder(image_one)  # batch*2048
         online_pred_two = self.online_encoder(image_two)
 
@@ -862,6 +891,11 @@ class KLServerModel(BaseModel):
         return loss, q, k
 
     def forward(self, image_one, image_two, client_result, device):
+        student_feat_one = self.online_encoder(image_one)
+        student_feat_two = self.online_encoder(image_two)
+        student_feat = torch.cat([student_feat_one, student_feat_two], dim=0)
+        return reid_feature_distill_loss(student_feat, client_result)
+
         online_pred_one = self.online_encoder(image_one)  # batch*2048
         online_pred_two = self.online_encoder(image_two)
 
