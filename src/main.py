@@ -11,6 +11,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 # also keep src itself in path for `import reid`
+from reid.reid_wrapper import ReIDWrapper
 SRC_DIR = os.path.abspath(os.path.dirname(__file__))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
@@ -171,6 +172,18 @@ def build_client_encoder_plan(client_type, num_clients):
         pattern = ['resnet18', 'transreid_vit_base', 'transreid_deit_small', 'agw', 'pcb']
         return [pattern[i % len(pattern)] for i in range(num_clients)]
     raise ValueError(f"Unsupported client_type: {client_type}")
+
+
+class ServerEncoderProxy(torch.nn.Module):
+    def __init__(self, encoder):
+        super().__init__()
+        self.online_encoder = encoder
+
+
+def build_server_reid_head(server_model, num_classes, feat_dim=2048):
+    """Attach a trainable ReID head that reuses the server encoder features."""
+    proxy = ServerEncoderProxy(server_model.online_encoder)
+    return ReIDWrapper(proxy, num_classes=num_classes, feat_dim=feat_dim)
 
 def dict_to_ns(d):
     if isinstance(d, dict):
@@ -366,8 +379,12 @@ def _debug_eval_server_reid(server_model, val_loader, num_query, device, args, s
     if not getattr(args, "reid_debug_eval_server_stages", False):
         return
 
+    testing_model = getattr(server_model, "reid_head", None)
+    if testing_model is None:
+        testing_model = server_model.online_encoder
+
     metrics = test_reid(
-        server_model.online_encoder,
+        testing_model,
         val_loader,
         num_query=num_query,
         device=device,
@@ -480,7 +497,18 @@ def save_best_artifacts(path: str, model_path: str, round_id: int, server_model,
 def load_checkpoint(path: str, server_model, clients, device):
     ckpt = torch.load(path, map_location="cpu",weights_only=False)
 
-    server_model.load_state_dict(ckpt["server_model"], strict=False)
+    incompatible = server_model.load_state_dict(ckpt["server_model"], strict=False)
+    missing_keys = list(getattr(incompatible, "missing_keys", []))
+    unexpected_keys = list(getattr(incompatible, "unexpected_keys", []))
+    if missing_keys or unexpected_keys:
+        logger.warning(
+            f"[CKPT] load_state_dict mismatch: missing={missing_keys[:10]}, unexpected={unexpected_keys[:10]}"
+        )
+    if hasattr(server_model, "reid_head") and not any(k.startswith("reid_head.") for k in ckpt["server_model"].keys()):
+        logger.warning(
+            "[CKPT] checkpoint does not contain reid_head parameters; "
+            "if this is an old checkpoint, global test head is randomly initialized and results are not comparable."
+        )
 
     # 恢复每个 client 的权重（假设 clients 列表长度不变）
     client_states = ckpt.get("clients", [])
@@ -714,6 +742,7 @@ if __name__ == '__main__':
 
         if args.framework in ['ours', 'single', 'oursnoalign']:
             server_model = get_model(args.server_model, args.encoder_network, args.predictor_network)
+            server_model.reid_head = build_server_reid_head(server_model, num_classes=num_classes)
         else:
             raise ValueError(f"Unsupported framework in ReID branch: {args.framework}")
 
@@ -911,8 +940,11 @@ if __name__ == '__main__':
                 logger.info(f"---------Time cost of align is {time.time() - align_time}s---------")
 
                 if (epoch + 1) % args.test_every == 0:
+                    testing_model = getattr(server_model, "reid_head", None)
+                    if testing_model is None:
+                        testing_model = server_model.online_encoder
                     results = test_reid(
-                        server_model.online_encoder,
+                        testing_model,
                         val_loader,
                         num_query=num_query,
                         device=devices[0],
