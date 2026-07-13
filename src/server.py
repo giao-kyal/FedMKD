@@ -255,6 +255,8 @@ class MyDistillServer(BaseClient):
             teacher_devices = [device]
         teacher_devices = [d if isinstance(d, torch.device) else torch.device(d) for d in teacher_devices]
         teacher_devices = [d for d in teacher_devices if d.type == "cuda"]
+        # Keep the student on `device` and place teachers on other GPUs when possible.
+        teacher_devices = [d for d in teacher_devices if d != device]
         if not teacher_devices:
             teacher_devices = [device]
 
